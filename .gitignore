@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+_bmad
+.agents
+.bmad-loop
+.codex
+.claude
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+_bmad/render/
+CV_Analyzer_Requirements_Document.md
+_bmad-output/
+graphify-out/
