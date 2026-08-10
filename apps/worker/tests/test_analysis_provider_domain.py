@@ -10,10 +10,14 @@ from pydantic import ValidationError
 from src.domain.analysis_provider import (
     AnalysisProposal,
     AnalysisState,
+    DocxLocator,
     FAILURE_CATEGORY_BY_REASON,
     FailureReason,
     JobRequirement,
+    PdfLocator,
     ProposalItem,
+    ResumeSourceUnit,
+    Span,
     map_failure,
     validate_complete,
 )
@@ -108,3 +112,23 @@ def test_all_five_failure_categories_are_frozen_and_distinct():
 def test_map_failure_returns_exactly_one_frozen_category(reason):
     category = map_failure(reason)
     assert category in FAILURE_CATEGORY_BY_REASON.values()
+
+
+def test_resume_source_unit_defaults_locator_to_none():
+    unit = ResumeSourceUnit(id="unit-1", text="Backend engineer.")
+    assert unit.locator is None
+
+
+def test_resume_source_unit_round_trips_pdf_locator():
+    locator = PdfLocator(page=2, span=Span(start=10, end=40), excerpt="Backend engineer for 5 years")
+    unit = ResumeSourceUnit(id="unit-1", text="Backend engineer for 5 years", locator=locator)
+    assert unit.locator.page == 2
+    assert unit.locator.span == Span(start=10, end=40)
+    assert unit.locator.excerpt == "Backend engineer for 5 years"
+
+
+def test_resume_source_unit_round_trips_docx_locator():
+    locator = DocxLocator(path="body/p[4]", span=Span(start=0, end=20), excerpt="Mentored two juniors")
+    unit = ResumeSourceUnit(id="unit-2", text="Mentored two juniors", locator=locator)
+    assert unit.locator.path == "body/p[4]"
+    assert unit.locator.span.end == 20

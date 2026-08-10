@@ -38,11 +38,45 @@ class JobRequirement:
 
 
 @dataclass(frozen=True)
+class Span:
+    """Normalized-text character offsets [start, end) within a source unit."""
+
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class PdfLocator:
+    """AR-25: PDF Evidence locates by page plus source unit/span and excerpt."""
+
+    page: int
+    span: Span
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class DocxLocator:
+    """AR-25: DOCX Evidence locates by stable section/paragraph/table path plus span and excerpt.
+
+    `path` examples: "body/p[4]" for a body paragraph, "table[1]/row[2]/cell[1]/p[1]"
+    for a table cell paragraph — stable across re-parses of the same document version.
+    """
+
+    path: str
+    span: Span
+    excerpt: str
+
+
+Locator = PdfLocator | DocxLocator
+
+
+@dataclass(frozen=True)
 class ResumeSourceUnit:
     """A minimized, normalized Resume unit (AD-9) — never identity/contact/protected content."""
 
     id: str
     text: str
+    locator: Locator | None = None
 
 
 class ProposalItem(BaseModel):
