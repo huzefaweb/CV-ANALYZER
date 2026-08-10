@@ -1,0 +1,29 @@
+# Overrides .gitignore for graphify's scan only (graphify prefers this file
+# over .gitignore when present). Mirrors .gitignore's real noise/secret
+# exclusions but deliberately does NOT exclude _bmad-output/ — those planning
+# docs are gitignored for git purposes only; graphify still needs to index
+# them. See CLAUDE.md "Graphify" section.
+
+__pycache__/
+*.py[codz]
+.venv
+env/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+_bmad
+.agents
+.bmad-loop
+.codex
+.claude
+_bmad/render/
+graphify-out/
