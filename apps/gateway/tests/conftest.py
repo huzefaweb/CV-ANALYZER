@@ -22,11 +22,29 @@ def engine():
     return create_engine(database_url)
 
 
+@pytest.fixture(scope="session")
+def _authorization_matrix_schema(engine):
+    """Applies Story 1.5c's harness-only fixture table (never Alembic).
+
+    Only requested (indirectly, via db_session) by tests that already need a
+    live DATABASE_URL — never autouse, so DB-less test modules are unaffected.
+    """
+    from tests.fixtures.authorization_matrix_schema import SCHEMA_SQL
+
+    with engine.begin() as conn:
+        conn.execute(text(SCHEMA_SQL))
+
+
 @pytest.fixture()
-def db_session(engine):
+def db_session(engine, _authorization_matrix_schema):
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     session = session_factory()
-    session.execute(text("TRUNCATE TABLE sessions, users RESTART IDENTITY CASCADE"))
+    session.execute(
+        text(
+            "TRUNCATE TABLE sessions, users, authorization_matrix_fixture_object "
+            "RESTART IDENTITY CASCADE"
+        )
+    )
     session.commit()
     yield session
     session.close()
