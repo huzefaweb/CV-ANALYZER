@@ -31,7 +31,19 @@ CV-ANALYZER: a private, single-Organization recruiter tool that scores and ranks
 
 - **Ponytail** (lazy-but-correct coding discipline) is enabled project-wide via `.claude/settings.local.json` and applies automatically every session — no need to re-invoke it, just actually follow the ladder: real need → reuse existing code → stdlib/native → existing dependency → minimal new code.
 - **Graphify** — a local, free (tree-sitter, no LLM) knowledge graph of this codebase lives in `graphify-out/`. Prefer `graphify query "<question>"` / `graphify explain <node>` / `graphify path A B` over cold grep-and-read sweeps when exploring "where is X" / "what calls Y". Rebuild with `/graphify .` if it's missing or stale for the area you're touching.
-- **bmad-loop** drives the per-story dev loop (create-story → dev → review → commit) unattended. See `.bmad-loop/policy.toml` for adapter/gate/limit settings. Story queue source is `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- **No external orchestrator.** The per-story dev loop runs natively inside this Claude Code session — not through the `bmad-loop` CLI/tmux orchestrator (deliberately dropped: it spawned untrackable sessions with no visibility into whether ponytail/graphify were actually followed). Story queue source is still `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+
+### Per-story loop (say "loop story `<epic>.<story>`", e.g. "loop story 1.2")
+
+Run these in order, in this same session, so ponytail/graphify usage is directly visible rather than delegated to a spawned process:
+
+1. **CS — `bmad-create-story`** for the given story key. Produces `_bmad-output/implementation-artifacts/spec-<key>-<slug>.md`.
+2. **Validate + fix** — check the produced spec against the Ready-for-Development standard (Actionable, Logical, Testable, Complete, Sufficient, Coherent — see `bmad-dev-auto`'s definition). Fix gaps directly in the spec before moving on; don't hand a broken spec to dev.
+3. **DS — `bmad-dev-story`** on that spec file. Runs to completion (all ACs + tasks checked) or a HALT condition.
+4. **CR — `bmad-code-review`** on the resulting diff. Apply the findings (fix, or explicitly mark skipped with reason).
+5. **Commit** referencing the story's FR/NFR/AR/AD/UX-DR traceability IDs, then flip that story's `sprint-status.yaml` entry to `done`.
+
+Pick up the next story only when explicitly told the next number — this is intentionally one-story-at-a-time, not an unattended sweep through all 41.
 
 ## Non-negotiables from the PRD (recur across almost every story)
 
