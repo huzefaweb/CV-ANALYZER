@@ -52,6 +52,14 @@ services:
       # ponytail: same role as gateway until a table-owning story needs the
       # worker's own least-privilege role (AD-15/AR-43) to grant against.
       WORKER_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Analysis-provider adapter selection (AD-22): presence of all four
+      # AZURE_OPENAI_* vars below selects Azure OpenAI; their absence (the
+      # V1 default) selects the local Ollama adapter at OLLAMA_HOST.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-}
     volumes:
       - ./apps/worker:/app
       - /app/.venv
@@ -59,6 +67,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest@sha256:a61a8fd395dbb931cc8cb1b5da7a2510746575c87113fdc45b647ee59ef7f808
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   web:
     build:
@@ -82,3 +103,7 @@ volumes:
   # Restricted source-byte volume (AD-15): mounted only into gateway and
   # worker, never into web.
   restricted-source-volume:
+  # Pulled Ollama models persist here so `ollama pull` survives container
+  # restarts. One-time pre-demo step (AD-22): `docker compose exec ollama
+  # ollama pull qwen2.5:0.5b-instruct`.
+  ollama-data:
