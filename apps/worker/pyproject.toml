@@ -20,3 +20,4 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = ["slow: deliberately slow real-timing tests (Story 1.5a)"]
