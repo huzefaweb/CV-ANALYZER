@@ -65,6 +65,10 @@ services:
       context: ./apps/web
     working_dir: /app
     command: ["npm", "run", "dev"]
+    environment:
+      # Server-side only (no NEXT_PUBLIC_ prefix) — browser JS never talks to
+      # the gateway directly (AD-2/AD-21).
+      GATEWAY_URL: http://gateway:8000
     ports:
       - "3000:3000"
     volumes:

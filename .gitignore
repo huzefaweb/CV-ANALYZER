@@ -224,6 +224,10 @@ out/
 *.tsbuildinfo
 next-env.d.ts
 
+# The generic Python `lib/` ignore rule above also matches apps/web/lib/
+# (git patterns aren't Python-directory-scoped) — un-ignore it explicitly.
+!apps/web/lib/
+
 _bmad
 .agents
 .bmad-loop
