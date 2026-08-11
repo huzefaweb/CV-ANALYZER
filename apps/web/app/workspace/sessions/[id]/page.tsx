@@ -19,7 +19,13 @@ export default async function WorkspaceSessionPage({ params }: { params: Promise
     headers: { Cookie: `${SESSION_COOKIE}=${token}` },
   });
 
-  if (response.status === 401 || response.status === 403) redirect("/login");
+  // A token existed but the gateway rejected it (expired/revoked) — route
+  // through the neutral Session expired surface, not straight to Login.
+  if (response.status === 401) {
+    redirect(`/session-expired?return_to=${encodeURIComponent(`/workspace/sessions/${id}`)}`);
+  }
+  // Not yet admitted — unchanged deferred limitation (deferred-work.md).
+  if (response.status === 403) redirect("/login");
 
   // AD-3/AC#3: only the gateway's neutral 404 (missing/malformed/cross-owner
   // — all identical) renders this copy. Any other failure (5xx, network) is

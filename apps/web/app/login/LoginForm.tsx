@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
-export default function LoginForm() {
+export default function LoginForm({ returnTo }: { returnTo?: string }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -37,8 +37,10 @@ export default function LoginForm() {
       setError("Sign in failed. Check your email and password and try again.");
       return;
     }
-    // AC#2: the only allowlisted relative redirect target for this story.
-    router.push("/");
+    // AC#2 (Story 2.4): returnTo is already validated server-side by
+    // login/page.tsx via isAllowedReturnPath — this component trusts it as
+    // a prop, never a raw query string.
+    router.push(returnTo ?? "/");
   }
 
   return (

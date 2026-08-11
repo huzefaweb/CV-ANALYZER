@@ -14,11 +14,14 @@ export default async function NewAnalysisPage() {
   const response = await gatewayFetch("/identity/session", {
     headers: { Cookie: `${SESSION_COOKIE}=${token}` },
   });
-  // 401 (no/expired/tampered session) and 403 (not yet admitted) both route
-  // to Login for now — no distinct "Access pending" surface exists in this
-  // repo yet (out of scope here; deferred-work.md tracks it). A genuine
-  // server error is not the same failure and must not be masked as one.
-  if (response.status === 401 || response.status === 403) redirect("/login");
+  // A token existed but the gateway rejected it (expired/revoked) — route
+  // through the neutral Session expired surface, not straight to Login.
+  if (response.status === 401) redirect(`/session-expired?return_to=${encodeURIComponent("/new-analysis")}`);
+  // 403 (not yet admitted) routes to Login for now — no distinct "Access
+  // pending" surface exists in this repo yet (out of scope here;
+  // deferred-work.md tracks it). A genuine server error is not the same
+  // failure and must not be masked as one.
+  if (response.status === 403) redirect("/login");
   if (!response.ok) throw new Error(`Admission check failed: ${response.status}`);
 
   return (

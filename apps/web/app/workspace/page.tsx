@@ -18,7 +18,11 @@ export default async function WorkspacePage() {
   const response = await gatewayFetch("/workspace", {
     headers: { Cookie: `${SESSION_COOKIE}=${token}` },
   });
-  if (response.status === 401 || response.status === 403) redirect("/login");
+  // A token existed but the gateway rejected it (expired/revoked) — route
+  // through the neutral Session expired surface, not straight to Login.
+  if (response.status === 401) redirect(`/session-expired?return_to=${encodeURIComponent("/workspace")}`);
+  // Not yet admitted — unchanged deferred limitation (deferred-work.md).
+  if (response.status === 403) redirect("/login");
   if (!response.ok) throw new Error(`Workspace request failed: ${response.status}`);
 
   const data: { session: WorkspaceSession | null } = await response.json();

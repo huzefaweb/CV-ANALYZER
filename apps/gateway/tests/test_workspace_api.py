@@ -205,6 +205,69 @@ def test_same_subject_under_a_different_issuer_is_not_owned(db_session):
     assert by_id.json() == {"detail": "Not found"}
 
 
+def test_reauthentication_fetches_a_fresh_projection_not_stale_content(db_session):
+    """AC#2 (Story 2.4): after a session expires (401) and the same admitted
+    user reauthenticates with a fresh session, GET /workspace must reflect
+    current state, not any cached/stale result from before expiry. There is
+    no server-side cache to invalidate (Story 2.3) — this proves that
+    already-true property under the specific expire-then-reauthenticate
+    sequence."""
+    email = _email()
+    identity = local_identity.register(db_session, email, "a-fixture-password")
+    local_identity.admit_user(db_session, identity.subject)
+    original_session = local_identity.authenticate(db_session, email, "a-fixture-password")
+    session_id = _seed_session(
+        db_session, identity.issuer, identity.subject, "draft", datetime.now(timezone.utc)
+    )
+
+    from src.adapters.models import Session as SessionRecord
+
+    record = db_session.get(SessionRecord, original_session.token)
+    record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    client.cookies.set("session", original_session.token)
+    expired = client.get("/workspace")
+    assert expired.status_code == 401
+    client.cookies.clear()
+
+    fresh_session = local_identity.authenticate(db_session, email, "a-fixture-password")
+    client.cookies.set("session", fresh_session.token)
+    reauthenticated = client.get("/workspace")
+    client.cookies.clear()
+
+    assert reauthenticated.status_code == 200
+    assert reauthenticated.json()["session"]["id"] == session_id
+
+
+def test_revoked_admission_after_reauthentication_stays_neutral_not_cached(db_session):
+    """AC#2: if admission is revoked between the original session and a
+    fresh reauthentication, the fresh session must still see 403 — not a
+    stale 200 carried over from the earlier, still-admitted session."""
+    email = _email()
+    identity = local_identity.register(db_session, email, "a-fixture-password")
+    local_identity.admit_user(db_session, identity.subject)
+    original_session = local_identity.authenticate(db_session, email, "a-fixture-password")
+    _seed_session(db_session, identity.issuer, identity.subject, "draft", datetime.now(timezone.utc))
+
+    client.cookies.set("session", original_session.token)
+    assert client.get("/workspace").status_code == 200
+    client.cookies.clear()
+
+    from src.adapters.models import User
+
+    user = db_session.get(User, identity.subject)
+    user.admitted_at = None
+    db_session.commit()
+
+    fresh_session = local_identity.authenticate(db_session, email, "a-fixture-password")
+    client.cookies.set("session", fresh_session.token)
+    revoked = client.get("/workspace")
+    client.cookies.clear()
+
+    assert revoked.status_code == 403
+
+
 def test_oversized_session_id_is_neutral_not_a_server_error(db_session):
     """The id column is String(36); an oversized id must still return the
     same neutral 404 rather than reaching Postgres and surfacing a

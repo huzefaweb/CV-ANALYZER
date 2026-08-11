@@ -252,3 +252,33 @@ def test_repeated_valid_reads_are_idempotent(db_session):
     after_record = db_session.get(SessionRecord, cookie)
     assert (after_record.expires_at, after_record.revoked_at) == (before_expires_at, before_revoked_at)
     client.cookies.clear()
+
+
+def test_logout_is_idempotent_at_the_api_boundary(db_session):
+    """AC#3: repeated logout must not error, whether the second call still
+    carries the now-revoked cookie or carries no cookie at all. The
+    domain-level no-op is already proven by
+    test_local_identity.py::test_logout_is_idempotent; this closes the same
+    gap at the actual HTTP route, which had no direct coverage."""
+    from src.adapters import local_identity
+
+    email = _email()
+    password = "a fixture password for idempotent logout"
+    local_identity.register(db_session, email, password)
+    login = client.post("/identity/login", json={"email": email, "password": password})
+    cookie = login.cookies.get("session")
+    assert cookie
+
+    client.cookies.set("session", cookie)
+    first_logout = client.post("/identity/logout")
+    assert first_logout.status_code == 200
+    assert first_logout.json() == {"status": "logged_out"}
+
+    second_logout = client.post("/identity/logout")
+    assert second_logout.status_code == 200
+    assert second_logout.json() == {"status": "logged_out"}
+    client.cookies.clear()
+
+    third_logout_no_cookie = client.post("/identity/logout")
+    assert third_logout_no_cookie.status_code == 200
+    assert third_logout_no_cookie.json() == {"status": "logged_out"}

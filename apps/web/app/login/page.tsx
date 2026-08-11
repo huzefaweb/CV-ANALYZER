@@ -1,4 +1,5 @@
 import { authProviderConfigured } from "@/lib/adapter";
+import { isAllowedReturnPath } from "@/lib/session";
 import LoginForm from "./LoginForm";
 
 // Reads process.env directly at render time — must not be statically
@@ -8,8 +9,14 @@ export const dynamic = "force-dynamic";
 
 // UX-DR5/UX-DR8: the public Login/provider-handoff surface. Copy mirrors
 // _bmad-output/planning-artifacts/ux-designs/ux-CV-ANALYZER-2026-08-09/mockups/login.html.
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ return_to?: string | string[] }>;
+}) {
   const providerConfigured = authProviderConfigured();
+  const { return_to } = await searchParams;
+  const returnTo = isAllowedReturnPath(return_to) ? return_to : undefined;
 
   return (
     <main id="main">
@@ -58,7 +65,7 @@ export default function LoginPage() {
         ) : (
           <>
             <p>Sign in with your email and password. CV Analyzer stores only a securely hashed password — never your password itself.</p>
-            <LoginForm />
+            <LoginForm returnTo={returnTo} />
           </>
         )}
         <p>
