@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from .config import load_settings
 from .db import init_engine
+from .document_upload import router as document_upload_router
 from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
 from .workspace import router as workspace_router
@@ -26,6 +27,7 @@ app = FastAPI(title="CV Analyzer Gateway")
 # protected route today.
 app.include_router(workspace_router)
 app.include_router(new_analysis_router)
+app.include_router(document_upload_router)
 
 # AD-21: only the active adapter's routes are mounted. AUTH0_* absent (V1
 # default) selects the local adapter; the Auth0 adapter preflight is

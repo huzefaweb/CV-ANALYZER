@@ -126,8 +126,8 @@ export default function JobDescriptionForm({
       </p>
       <div className="notice" id="analyze-blocked">
         {validation.is_valid
-          ? "Document upload is available in a later story — Analyze cannot be enabled yet."
-          : `Enter at least ${validation.minimum_required} non-whitespace characters (currently ${validation.non_whitespace_count}). Document upload is also available in a later story.`}
+          ? "Analyze is not available yet."
+          : `Enter at least ${validation.minimum_required} non-whitespace characters (currently ${validation.non_whitespace_count}). Analyze is also not available yet.`}
       </div>
     </form>
   );

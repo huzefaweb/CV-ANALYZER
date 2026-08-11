@@ -55,3 +55,27 @@ class AnalysisSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     job_description_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     job_description_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class Document(Base):
+    """Story 3.2 (AR-8, AR-36): one accepted Resume Document per row.
+
+    Rejected intake never reaches this table (AF-3) — only validated,
+    stored files are persisted here. `storage_path` and `idempotency_key`
+    are internal-only and must never leave the module that reads this row
+    (NFR-12).
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_reference: Mapped[str] = mapped_column(String(16), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    storage_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ready")
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

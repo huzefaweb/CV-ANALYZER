@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import JobDescriptionForm from "./JobDescriptionForm";
+import DocumentUpload, { type DocumentProjection } from "./DocumentUpload";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +55,12 @@ export default async function NewAnalysisPage() {
 
   const draft: DraftProjection = await response.json();
 
+  const documentsResponse = await gatewayFetch(`/new-analysis/${draft.id}/documents`, {
+    headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+  });
+  if (!documentsResponse.ok) throw new Error(`Document list request failed: ${documentsResponse.status}`);
+  const { documents }: { documents: DocumentProjection[] } = await documentsResponse.json();
+
   return (
     <main id="main">
       <h1>New Analysis</h1>
@@ -63,7 +70,7 @@ export default async function NewAnalysisPage() {
         initialVersion={draft.job_description_version}
         initialValidation={draft.validation}
       />
-      <p>Document upload will be available here in a later story.</p>
+      <DocumentUpload sessionId={draft.id} initialDocuments={documents} />
     </main>
   );
 }

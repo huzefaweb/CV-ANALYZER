@@ -11,6 +11,8 @@ dependencies = [
     "fastapi==0.139.2",
     "psycopg[binary]==3.*",
     "pydantic>=2,<3",
+    "pypdf>=6.15.0",
+    "python-multipart>=0.0.20",
     "sqlalchemy>=2.0.51",
     "uvicorn[standard]>=0.52.1",
 ]
