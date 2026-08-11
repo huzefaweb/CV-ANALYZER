@@ -8,6 +8,8 @@ caller, not a reason to write new admission or ownership primitives.
 
 from __future__ import annotations
 
+from typing import Any, Mapping
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
@@ -42,14 +44,13 @@ def _project(row: dict) -> dict[str, str]:
     }
 
 
-@router.get("")
-def latest_owned_session(
-    identity: Identity = Depends(require_admitted_identity),
-    db: OrmSession = Depends(get_db),
-) -> dict[str, dict[str, str] | None]:
-    """AC#1/AC#2: the single latest owned session, or none — never a list."""
+def _latest_owned_session_row(db: OrmSession, identity: Identity) -> Mapping[str, Any] | None:
+    """The single latest owned Analysis Session row, or `None`. Shared by
+    `latest_owned_session` below and Story 3.1's `new_analysis` module —
+    factored out so both reuse one ownership query instead of re-deriving
+    it."""
     table = AnalysisSession.__table__
-    row = (
+    return (
         db.execute(
             select(table)
             .where(table.c.creator_issuer == identity.issuer)
@@ -60,6 +61,15 @@ def latest_owned_session(
         .mappings()
         .one_or_none()
     )
+
+
+@router.get("")
+def latest_owned_session(
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, dict[str, str] | None]:
+    """AC#1/AC#2: the single latest owned session, or none — never a list."""
+    row = _latest_owned_session_row(db, identity)
     return {"session": _project(row) if row is not None else None}
 
 

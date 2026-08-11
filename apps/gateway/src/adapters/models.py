@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -42,10 +42,8 @@ class Session(Base):
 
 
 class AnalysisSession(Base):
-    """Minimal Epic-2 shape (AD-3): just enough to prove creator-owned
-    workspace lookups. Epic 3+ extends this same table with Job
-    Description/Scoring Configuration/lifecycle fields — it does not
-    replace it.
+    """Minimal Epic-2 shape (AD-3) plus Story 3.1's Job Description draft
+    fields — Epic 3+ extends this same table, it does not replace it.
     """
 
     __tablename__ = "analysis_sessions"
@@ -55,3 +53,5 @@ class AnalysisSession(Base):
     creator_subject: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    job_description_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    job_description_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
