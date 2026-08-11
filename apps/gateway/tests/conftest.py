@@ -41,8 +41,8 @@ def db_session(engine, _authorization_matrix_schema):
     session = session_factory()
     session.execute(
         text(
-            "TRUNCATE TABLE sessions, users, authorization_matrix_fixture_object "
-            "RESTART IDENTITY CASCADE"
+            "TRUNCATE TABLE sessions, users, authorization_matrix_fixture_object, "
+            "analysis_sessions RESTART IDENTITY CASCADE"
         )
     )
     session.commit()

@@ -39,3 +39,19 @@ class Session(Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalysisSession(Base):
+    """Minimal Epic-2 shape (AD-3): just enough to prove creator-owned
+    workspace lookups. Epic 3+ extends this same table with Job
+    Description/Scoring Configuration/lifecycle fields — it does not
+    replace it.
+    """
+
+    __tablename__ = "analysis_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    creator_issuer: Mapped[str] = mapped_column(String(255), nullable=False)
+    creator_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

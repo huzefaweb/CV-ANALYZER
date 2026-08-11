@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from .config import load_settings
 from .db import init_engine
 from .identity import router as identity_router
+from .workspace import router as workspace_router
 
 # Validated once at process startup (AC#5): a missing secret must fail the
 # boot, not surface as a SystemExit thrown from inside a request handler.
@@ -16,6 +17,13 @@ settings = load_settings()
 init_engine(settings.database_url)
 
 app = FastAPI(title="CV Analyzer Gateway")
+
+# workspace_router itself has no adapter-specific routes — mounted
+# unconditionally, unlike identity_router. It still only admits requests
+# through require_admitted_identity's current (local-only; see Story 2.2
+# Scope reality check) admission chain, same as every other protected route
+# today.
+app.include_router(workspace_router)
 
 # AD-21: only the active adapter's routes are mounted. AUTH0_* absent (V1
 # default) selects the local adapter; the Auth0 adapter preflight is
