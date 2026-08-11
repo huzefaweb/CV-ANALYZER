@@ -6,10 +6,20 @@ module-function contract rather than a class-based Protocol.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 
 from src.adapters import auth0_identity, local_identity
-from src.domain.identity import IDENTITY_PORT_FUNCTIONS
+from src.domain.identity import IDENTITY_PORT_FUNCTIONS, Identity
+
+
+def test_normalized_identity_carries_only_issuer_and_subject():
+    """Story 2.2 AC#1: Identity's declared field set is what every adapter is
+    structurally limited to producing — a static shape guarantee, not proof
+    of adapter call-site behavior (that's what test_identity_api.py's
+    response-body assertions cover)."""
+    fields = {f.name for f in dataclasses.fields(Identity)}
+    assert fields == {"issuer", "subject"}
 
 
 def test_both_adapters_expose_the_same_port_functions():
