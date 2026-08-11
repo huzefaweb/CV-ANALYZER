@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "fpdf2>=2.8.8",
     "pytest>=9.1.1",
+    "websockets>=17.0.1",
 ]
 
 [tool.pytest.ini_options]
