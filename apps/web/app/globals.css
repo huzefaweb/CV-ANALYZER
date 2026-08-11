@@ -1,0 +1,138 @@
+/* DESIGN.md tokens (Operational Workbench, light-only) — Login/Register subset.
+   Source: _bmad-output/planning-artifacts/ux-designs/ux-CV-ANALYZER-2026-08-09/mockups/login.html */
+:root {
+  --canvas: #eef2f5;
+  --panel: #fff;
+  --text: #172532;
+  --muted: #52616e;
+  --line: #bac5ce;
+  --strong: #6b7b88;
+  --action: #1f5e8c;
+  --app: #172b3a;
+  --focus: #c27a00;
+  --info: #e7eff6;
+  --info-text: #244d6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font: 16px/1.5 "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+}
+
+/* UX-DR33: skip link, hidden until focused. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 10;
+  transform: translateY(-180%);
+  background: #fff;
+  color: var(--action);
+  border: 2px solid var(--strong);
+  border-radius: 4px;
+  padding: 8px;
+}
+.skip-link:focus {
+  transform: none;
+}
+
+/* UX-DR33: visible 3px focus treatment everywhere, no outline removal. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: clamp(16px, 4vw, 48px);
+}
+
+.panel {
+  border: 1px solid var(--strong);
+  border-radius: 6px;
+  padding: 24px;
+  background: var(--panel);
+}
+
+.principles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 20px 0;
+}
+.principle {
+  border-top: 2px solid var(--strong);
+  padding: 10px 4px;
+}
+.principle b {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notice {
+  background: var(--info);
+  color: var(--info-text);
+  border-left: 4px solid var(--strong);
+  border-radius: 4px;
+  padding: 12px;
+  margin: 16px 0;
+}
+
+label {
+  display: block;
+  margin: 12px 0 4px;
+}
+
+input {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 16px;
+}
+
+/* UX-DR34: standard controls at least 36 px high, 24x24 minimum target. */
+button {
+  min-height: 36px;
+  padding: 0 18px;
+  border-radius: 4px;
+  border: 1px solid var(--action);
+  background: var(--action);
+  color: #fff;
+  font-weight: 700;
+  margin-top: 16px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+[role="alert"] {
+  color: #7a1f1f;
+}
+
+/* UX-DR36: reflow at 320 CSS px / 400% zoom without two-dimensional scroll. */
+@media (max-width: 400px) {
+  .principles {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* UX-DR38: honor prefers-reduced-motion — no transitions are defined above,
+   so there is nothing to disable; this rule documents the intent. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto;
+  }
+}

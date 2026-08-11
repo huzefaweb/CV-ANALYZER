@@ -31,6 +31,11 @@ services:
              uv run uvicorn src.adapters.api:app --host 0.0.0.0 --port 8000"
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Identity-adapter selection (AD-21): presence of all three selects
+      # Auth0; their absence (the V1 default) selects the local adapter.
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
     ports:
       - "8000:8000"
     volumes:
@@ -90,6 +95,11 @@ services:
       # Server-side only (no NEXT_PUBLIC_ prefix) — browser JS never talks to
       # the gateway directly (AD-2/AD-21).
       GATEWAY_URL: http://gateway:8000
+      # Identity-adapter selection (AD-21), mirrored from the gateway's own
+      # check so the Login/Register surface can decide which form to render.
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
     ports:
       - "3000:3000"
     volumes:

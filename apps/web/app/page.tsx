@@ -1,3 +1,7 @@
 export default function Page() {
-  return <p>CV Analyzer scaffold — no product UI yet.</p>;
+  return (
+    <main id="main">
+      <p>CV Analyzer scaffold — no product UI yet.</p>
+    </main>
+  );
 }
