@@ -17,7 +17,8 @@ from typing import Any, Mapping
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import exists as sa_exists
+from sqlalchemy import func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
@@ -275,22 +276,56 @@ async def upload_document(
 
     storage_path = store(document_id, 1, data_bytes)
 
-    try:
-        db.execute(
-            documents_table.insert().values(
-                id=document_id,
-                analysis_session_id=session_id,
-                document_reference=document_reference,
-                original_filename=filename,
-                content_version=1,
-                storage_path=storage_path,
-                size_bytes=len(data_bytes),
-                content_type=detected_type,
-                status="ready",
-                idempotency_key=idempotency_key,
-                created_at=datetime.now(timezone.utc),
+    # Session-status-conditional INSERT (Story 3.4, closing the deferred
+    # 3.2-review gap): the top-of-request `_authorize_draft_session` check
+    # is a cheap early exit, but the session could lock (Analyze) in the
+    # window between that check and this insert — this WHERE EXISTS makes
+    # the insert itself atomically conditional on the session still being
+    # `draft`, the same "one atomic statement, not read-then-write"
+    # discipline every CAS in this codebase follows.
+    created_at = datetime.now(timezone.utc)
+    insert_stmt = documents_table.insert().from_select(
+        [
+            "id",
+            "analysis_session_id",
+            "document_reference",
+            "original_filename",
+            "content_version",
+            "storage_path",
+            "size_bytes",
+            "content_type",
+            "status",
+            "idempotency_key",
+            "created_at",
+        ],
+        select(
+            literal(document_id),
+            literal(session_id),
+            literal(document_reference),
+            literal(filename),
+            literal(1),
+            literal(storage_path),
+            literal(len(data_bytes)),
+            literal(detected_type),
+            literal("ready"),
+            literal(idempotency_key),
+            literal(created_at),
+        ).where(
+            sa_exists(
+                select(1)
+                .select_from(AnalysisSession.__table__)
+                .where(AnalysisSession.__table__.c.id == session_id)
+                .where(AnalysisSession.__table__.c.status == "draft")
             )
-        )
+        ),
+    )
+
+    try:
+        result = db.execute(insert_stmt)
+        if result.rowcount == 0:
+            db.rollback()
+            _remove_orphaned_file(storage_path)
+            raise HTTPException(status_code=409, detail="This draft is no longer editable")
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -348,13 +383,23 @@ def remove_document(
 
     # Atomic CAS UPDATE — one statement, not a read-then-write (the exact
     # lesson from Story 3.1's review: the WHERE clause is the concurrency
-    # guard, a prior SELECT is not).
+    # guard, a prior SELECT is not). The session-status subquery closes the
+    # gap deferred by 3.2's/3.3's own reviews: Story 3.4's Analyze can now
+    # lock the session concurrently with an in-flight remove, so the CAS
+    # itself must also re-verify the session is still `draft`.
     result = db.execute(
         documents_table.update()
         .where(documents_table.c.id == document_id)
         .where(documents_table.c.analysis_session_id == session_id)
         .where(documents_table.c.content_version == body.expected_version)
         .where(documents_table.c.status == "ready")
+        .where(
+            documents_table.c.analysis_session_id.in_(
+                select(AnalysisSession.__table__.c.id).where(
+                    AnalysisSession.__table__.c.status == "draft"
+                )
+            )
+        )
         .values(status="removed", last_command_idempotency_key=body.idempotency_key)
     )
     if result.rowcount == 0:
@@ -370,7 +415,10 @@ def remove_document(
             # A concurrent request with the identical key won the race —
             # this is a true-concurrency replay, not a stale conflict.
             return JSONResponse(status_code=200, content=_project(current))
-        return JSONResponse(status_code=409, content=_project(current))
+        return JSONResponse(
+            status_code=409,
+            content={**_project(current), "session_locked": _is_session_locked(db, session_id)},
+        )
 
     db.commit()
     updated = db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
@@ -431,6 +479,13 @@ async def replace_document(
         .where(documents_table.c.analysis_session_id == session_id)
         .where(documents_table.c.content_version == expected_version)
         .where(documents_table.c.status == "ready")
+        .where(
+            documents_table.c.analysis_session_id.in_(
+                select(AnalysisSession.__table__.c.id).where(
+                    AnalysisSession.__table__.c.status == "draft"
+                )
+            )
+        )
         .values(
             content_version=new_version,
             storage_path=storage_path,
@@ -454,11 +509,29 @@ async def replace_document(
         _remove_orphaned_file(storage_path)
         if current["last_command_idempotency_key"] == idempotency_key and current["status"] == "ready":
             return JSONResponse(status_code=200, content=_project(current))
-        return JSONResponse(status_code=409, content=_project(current))
+        return JSONResponse(
+            status_code=409,
+            content={**_project(current), "session_locked": _is_session_locked(db, session_id)},
+        )
 
     db.commit()
     updated = db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
     return JSONResponse(status_code=200, content=_project(updated))
+
+
+def _is_session_locked(db: OrmSession, session_id: str) -> bool:
+    """Review finding (Story 3.4): a CAS-miss on remove/replace's `UPDATE`
+    can now mean either an ordinary stale-`content_version` conflict or the
+    session having locked (Analyze) mid-request — previously both returned
+    an identical document projection with no way to tell them apart.
+    Callers should stop retrying on the latter, not the former."""
+    session_table = AnalysisSession.__table__
+    row = (
+        db.execute(select(session_table.c.status).where(session_table.c.id == session_id))
+        .mappings()
+        .one_or_none()
+    )
+    return row is not None and row["status"] != "draft"
 
 
 def _new_uuid() -> str:

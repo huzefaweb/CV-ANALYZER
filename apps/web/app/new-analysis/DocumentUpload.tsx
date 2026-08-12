@@ -26,13 +26,25 @@ const MAX_DOCUMENT_COUNT = 20;
 export default function DocumentUpload({
   sessionId,
   initialDocuments,
+  onDocumentsChange,
 }: {
   sessionId: string;
   initialDocuments: DocumentProjection[];
+  onDocumentsChange?: (documents: DocumentProjection[]) => void;
 }) {
   const [rows, setRows] = useState<Row[]>(
     initialDocuments.map((document) => ({ key: document.id, state: "ready", document }))
   );
+
+  // Analyze (Story 3.4) needs the live Ready-Document set to build its
+  // expected_document_versions snapshot — reported via callback rather than
+  // lifting `rows` itself, so this component's internal row-state shape
+  // (pending/replacing/rejected) stays private to it.
+  useEffect(() => {
+    onDocumentsChange?.(
+      rows.filter((row): row is Extract<Row, { state: "ready" }> => row.state === "ready").map((row) => row.document)
+    );
+  }, [rows, onDocumentsChange]);
   const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
@@ -317,7 +329,7 @@ export default function DocumentUpload({
               </span>
             ) : null}
             {row.state === "ready" ? (
-              <span>
+              <span id={`document-${row.document.id}`}>
                 <span aria-label={`${row.document.document_reference}, ${row.document.original_filename}, Ready`}>
                   {row.document.document_reference} — {row.document.original_filename} — Ready
                 </span>

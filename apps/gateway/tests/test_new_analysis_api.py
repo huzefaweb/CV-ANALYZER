@@ -104,18 +104,36 @@ def test_post_is_idempotent_no_duplicate_row(db_session):
     assert count == 1
 
 
-def test_post_returns_409_when_latest_session_is_not_draft(db_session):
+def test_post_returns_200_with_reconstructed_state_when_latest_session_is_not_draft(db_session):
+    """Story 3.4 (AC#3): a non-draft owned session is reconstructed, not a
+    dead-end — and no second session is ever created regardless of status
+    code (unchanged from the original 3.1/2.3 guarantee)."""
     identity, token = _admitted_identity_and_token(db_session)
-    _seed_session(db_session, identity.issuer, identity.subject, "preparing", datetime.now(timezone.utc))
+    session_id = _seed_session(
+        db_session, identity.issuer, identity.subject, "preparing_to_start", datetime.now(timezone.utc)
+    )
     client.cookies.set("session", token)
 
     response = client.post("/new-analysis")
     client.cookies.clear()
 
-    assert response.status_code == 409
+    assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"id", "status"}
-    assert body["status"] == "preparing"
+    assert body["id"] == session_id
+    assert body["status"] == "preparing_to_start"
+    # No StartPreparation row was seeded for this directly-SQL-seeded
+    # fixture — the nested projection must be null, not an error.
+    assert body["preparation"] is None
+
+    count = (
+        db_session.query(AnalysisSession)
+        .filter(
+            AnalysisSession.creator_issuer == identity.issuer,
+            AnalysisSession.creator_subject == identity.subject,
+        )
+        .count()
+    )
+    assert count == 1
 
 
 def test_put_saves_multiline_text_and_increments_version(db_session):
@@ -255,7 +273,7 @@ def test_put_missing_malformed_and_cross_owner_ids_are_neutral(db_session):
 
 def test_put_against_a_locked_non_draft_session_returns_409(db_session):
     identity, token = _admitted_identity_and_token(db_session)
-    session_id = _seed_session(db_session, identity.issuer, identity.subject, "preparing", datetime.now(timezone.utc))
+    session_id = _seed_session(db_session, identity.issuer, identity.subject, "preparing_to_start", datetime.now(timezone.utc))
     client.cookies.set("session", token)
 
     response = client.put(

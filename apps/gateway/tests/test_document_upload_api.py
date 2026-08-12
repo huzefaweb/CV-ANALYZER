@@ -302,7 +302,7 @@ def test_replayed_idempotency_key_returns_existing_document_without_duplicate(db
 
 def test_upload_against_locked_session_returns_409(db_session):
     identity, token = _admitted_identity_and_token(db_session)
-    session_id = _seed_session(db_session, identity.issuer, identity.subject, status="preparing")
+    session_id = _seed_session(db_session, identity.issuer, identity.subject, status="preparing_to_start")
     client.cookies.set("session", token)
 
     response = _upload(session_id, "resume.pdf", valid_pdf_bytes())
@@ -563,7 +563,7 @@ def test_remove_and_replace_against_locked_session_return_409(db_session):
     client.cookies.set("session", token)
     uploaded = _upload(session_id, "resume.pdf", valid_pdf_bytes()).json()
 
-    db_session.query(AnalysisSession).filter(AnalysisSession.id == session_id).update({"status": "preparing"})
+    db_session.query(AnalysisSession).filter(AnalysisSession.id == session_id).update({"status": "preparing_to_start"})
     db_session.commit()
 
     remove_response = _remove(session_id, uploaded["id"], expected_version=uploaded["content_version"])

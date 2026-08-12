@@ -3,18 +3,20 @@
 import { useState, type FormEvent } from "react";
 import { countNonWhitespaceCharacters } from "@/lib/validation";
 
-type Validation = { non_whitespace_count: number; is_valid: boolean; minimum_required: number };
+export type Validation = { non_whitespace_count: number; is_valid: boolean; minimum_required: number };
 
 export default function JobDescriptionForm({
   sessionId,
   initialText,
   initialVersion,
   initialValidation,
+  onSaved,
 }: {
   sessionId: string;
   initialText: string;
   initialVersion: number;
   initialValidation: Validation;
+  onSaved?: (saved: { version: number; validation: Validation }) => void;
 }) {
   const [text, setText] = useState(initialText);
   const [version, setVersion] = useState(initialVersion);
@@ -56,6 +58,7 @@ export default function JobDescriptionForm({
       setVersion(body.job_description_version);
       setValidation(body.validation);
       setStatus("saved");
+      onSaved?.({ version: body.job_description_version, validation: body.validation });
       return;
     }
 
@@ -118,17 +121,6 @@ export default function JobDescriptionForm({
       <button type="submit" disabled={status === "saving"}>
         {status === "saving" ? "Saving…" : "Save Job Description"}
       </button>
-
-      <p>
-        <button type="button" disabled aria-describedby="analyze-blocked">
-          Analyze
-        </button>
-      </p>
-      <div className="notice" id="analyze-blocked">
-        {validation.is_valid
-          ? "Analyze is not available yet."
-          : `Enter at least ${validation.minimum_required} non-whitespace characters (currently ${validation.non_whitespace_count}). Analyze is also not available yet.`}
-      </div>
     </form>
   );
 }

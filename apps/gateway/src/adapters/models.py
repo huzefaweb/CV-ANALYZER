@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -84,3 +84,25 @@ class Document(Base):
     # the row's own current state, not an insert-race collision backstop
     # (that's what idempotency_key/its unique index are for).
     last_command_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class StartPreparation(Base):
+    """Story 3.4 (AR-9, AR-10): the persisted lock created by `Analyze`.
+
+    One row serves as both "the Start Preparation" and "the one logical
+    preparation job" AC#1 requires — full lease/fencing columns (AD-6)
+    arrive with Story 4.1, once a coordinator actually claims this row.
+    `status` reserves MODELS.md's full sub-state vocabulary; this story only
+    ever writes `"queued"`.
+    """
+
+    __tablename__ = "start_preparations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    job_description_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_versions: Mapped[dict] = mapped_column(JSON, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
