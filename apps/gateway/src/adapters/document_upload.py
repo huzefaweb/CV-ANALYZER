@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
@@ -91,6 +92,81 @@ def _authorize_draft_session(db: OrmSession, identity: Identity, session_id: str
     return row
 
 
+def _authorize_draft_document(
+    db: OrmSession, identity: Identity, session_id: str, document_id: str
+) -> Mapping[str, Any]:
+    """Remove/replace share this: the session-ownership/lock check (AR-8,
+    "no mutation after lock") plus a session-scoped Document lookup — a
+    cross-session document_id gets the same neutral 404 a cross-owner
+    session_id already gets, never a distinguishable error."""
+    _authorize_draft_session(db, identity, session_id)
+    if len(document_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+    documents_table = Document.__table__
+    row = (
+        db.execute(
+            select(documents_table)
+            .where(documents_table.c.id == document_id)
+            .where(documents_table.c.analysis_session_id == session_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise _NOT_FOUND
+    return row
+
+
+async def _validate_and_read(file: UploadFile, filename: str) -> tuple[bytes, str] | RejectionCategory:
+    """Shared by upload and replace (Story 3.3): extension, streamed
+    bounded-memory size, signature, password/container, archive-expansion —
+    exactly the same deterministic precedence and detection this module
+    already established (Story 3.2). Excludes the count check, which is
+    upload-only (a replacement never changes how many Documents exist)."""
+    if not check_extension(filename):
+        await file.close()
+        return RejectionCategory.EXTENSION_REJECTED
+
+    data = bytearray()
+    oversized = False
+    while True:
+        chunk = await file.read(_CHUNK_SIZE)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > MAX_DOCUMENT_BYTES:
+            oversized = True
+            break
+    await file.close()
+    if oversized:
+        return RejectionCategory.SIZE_LIMIT
+    data_bytes = bytes(data)
+
+    detected_type = detect_signature(data_bytes[:8])
+    extension_type = PDF_CONTENT_TYPE if filename.lower().endswith(".pdf") else DOCX_CONTENT_TYPE
+    if detected_type is None or detected_type != extension_type:
+        return RejectionCategory.SIGNATURE_MISMATCH
+
+    if detected_type == PDF_CONTENT_TYPE:
+        container_result = check_pdf_password_and_container(data_bytes)
+    else:
+        container_result = check_docx_password_and_container(data_bytes)
+    if container_result == "password_protected":
+        return RejectionCategory.PASSWORD_PROTECTED
+    if container_result == "corrupt_container":
+        return RejectionCategory.CORRUPT_CONTAINER
+
+    if detected_type == DOCX_CONTENT_TYPE and not check_docx_archive_expansion(data_bytes):
+        return RejectionCategory.ARCHIVE_EXPANSION
+
+    return data_bytes, detected_type
+
+
+class RemoveDocumentRequest(BaseModel):
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(max_length=MAX_IDEMPOTENCY_KEY_LENGTH)
+
+
 @router.get("/{session_id}/documents")
 def list_documents(
     session_id: str,
@@ -111,6 +187,7 @@ def list_documents(
         db.execute(
             select(documents_table)
             .where(documents_table.c.analysis_session_id == session_id)
+            .where(documents_table.c.status == "ready")
             .order_by(documents_table.c.created_at.asc(), documents_table.c.id.asc())
         )
         .mappings()
@@ -163,45 +240,12 @@ async def upload_document(
     if current_count >= MAX_DOCUMENT_COUNT:
         return _rejected(filename, RejectionCategory.COUNT_EXCEEDED)
 
-    # 3. Extension check.
-    if not check_extension(filename):
-        return _rejected(filename, RejectionCategory.EXTENSION_REJECTED)
-
-    # 4. Bounded-memory streamed size check.
-    data = bytearray()
-    oversized = False
-    while True:
-        chunk = await file.read(_CHUNK_SIZE)
-        if not chunk:
-            break
-        data.extend(chunk)
-        if len(data) > MAX_DOCUMENT_BYTES:
-            oversized = True
-            break
-    await file.close()
-    if oversized:
-        return _rejected(filename, RejectionCategory.SIZE_LIMIT)
-    data_bytes = bytes(data)
-
-    # 5. Signature check — must also match the declared extension.
-    detected_type = detect_signature(data_bytes[:8])
-    extension_type = PDF_CONTENT_TYPE if filename.lower().endswith(".pdf") else DOCX_CONTENT_TYPE
-    if detected_type is None or detected_type != extension_type:
-        return _rejected(filename, RejectionCategory.SIGNATURE_MISMATCH)
-
-    # 6. Password/encryption + container integrity.
-    if detected_type == PDF_CONTENT_TYPE:
-        container_result = check_pdf_password_and_container(data_bytes)
-    else:
-        container_result = check_docx_password_and_container(data_bytes)
-    if container_result == "password_protected":
-        return _rejected(filename, RejectionCategory.PASSWORD_PROTECTED)
-    if container_result == "corrupt_container":
-        return _rejected(filename, RejectionCategory.CORRUPT_CONTAINER)
-
-    # 7. Archive-expansion (DOCX only).
-    if detected_type == DOCX_CONTENT_TYPE and not check_docx_archive_expansion(data_bytes):
-        return _rejected(filename, RejectionCategory.ARCHIVE_EXPANSION)
+    # 3-7. Extension/size/signature/password/archive-expansion — shared with
+    # replace (Task 2's extraction).
+    validated = await _validate_and_read(file, filename)
+    if isinstance(validated, RejectionCategory):
+        return _rejected(filename, validated)
+    data_bytes, detected_type = validated
 
     # 8. Accept: generate a collision-checked Document Reference, store
     # bytes, insert the row.
@@ -279,6 +323,142 @@ async def upload_document(
         .one()
     )
     return JSONResponse(status_code=201, content=_project(row))
+
+
+@router.post("/{session_id}/documents/{document_id}/remove")
+def remove_document(
+    session_id: str,
+    document_id: str,
+    body: RemoveDocumentRequest,
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+):
+    row = _authorize_draft_document(db, identity, session_id, document_id)
+    documents_table = Document.__table__
+
+    # Idempotent replay (AC#3): the identical remove command already ran —
+    # no second UPDATE, return the current (already-removed) projection.
+    if row["last_command_idempotency_key"] == body.idempotency_key and row["status"] == "removed":
+        return JSONResponse(status_code=200, content=_project(row))
+
+    if row["status"] != "ready":
+        # Already removed by a different command, or any other non-ready
+        # state — not this command's replay, so this is a real conflict.
+        return JSONResponse(status_code=409, content=_project(row))
+
+    # Atomic CAS UPDATE — one statement, not a read-then-write (the exact
+    # lesson from Story 3.1's review: the WHERE clause is the concurrency
+    # guard, a prior SELECT is not).
+    result = db.execute(
+        documents_table.update()
+        .where(documents_table.c.id == document_id)
+        .where(documents_table.c.analysis_session_id == session_id)
+        .where(documents_table.c.content_version == body.expected_version)
+        .where(documents_table.c.status == "ready")
+        .values(status="removed", last_command_idempotency_key=body.idempotency_key)
+    )
+    if result.rowcount == 0:
+        # A 0-row UPDATE changes nothing, but leaves the transaction's read
+        # view pinned to the pre-UPDATE snapshot under the default isolation
+        # level — roll back so the SELECT just below observes the current
+        # committed row (e.g. a concurrent winner's write), not a stale one.
+        db.rollback()
+        current = (
+            db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
+        )
+        if current["last_command_idempotency_key"] == body.idempotency_key and current["status"] == "removed":
+            # A concurrent request with the identical key won the race —
+            # this is a true-concurrency replay, not a stale conflict.
+            return JSONResponse(status_code=200, content=_project(current))
+        return JSONResponse(status_code=409, content=_project(current))
+
+    db.commit()
+    updated = db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
+    return JSONResponse(status_code=200, content=_project(updated))
+
+
+@router.put("/{session_id}/documents/{document_id}")
+async def replace_document(
+    session_id: str,
+    document_id: str,
+    file: UploadFile,
+    expected_version: int = Form(...),
+    idempotency_key: str = Form(...),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+):
+    row = _authorize_draft_document(db, identity, session_id, document_id)
+    documents_table = Document.__table__
+
+    filename = file.filename or ""
+    if len(filename) > MAX_FILENAME_LENGTH or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        await file.close()
+        return _rejected(filename, RejectionCategory.INVALID_REQUEST)
+    if expected_version < 0:
+        await file.close()
+        return _rejected(filename, RejectionCategory.INVALID_REQUEST)
+
+    # Idempotent replay (AC#3): the identical replace command already
+    # produced the row's current state — return it without re-reading the
+    # uploaded bytes or writing a second content-version file.
+    if row["last_command_idempotency_key"] == idempotency_key and row["status"] == "ready":
+        await file.close()
+        return JSONResponse(status_code=200, content=_project(row))
+
+    if row["status"] != "ready":
+        await file.close()
+        return JSONResponse(status_code=409, content=_project(row))
+
+    # Validate and read fully before touching the row (AC#2: a failed
+    # replacement must leave "the prior valid Document remains current" —
+    # nothing is written to the DB or disk until validation passes).
+    validated = await _validate_and_read(file, filename)
+    if isinstance(validated, RejectionCategory):
+        return _rejected(filename, validated)
+    data_bytes, detected_type = validated
+
+    new_version = row["content_version"] + 1
+    # A per-attempt random nonce (never derived from the filename, AR-36)
+    # guarantees two concurrent replace attempts against the same
+    # expected_version — which both compute the same new_version — never
+    # write to the same path, so whichever one wins the CAS below always
+    # references its own, correctly-written bytes.
+    storage_path = store(document_id, new_version, data_bytes, nonce=secrets.token_hex(8))
+
+    result = db.execute(
+        documents_table.update()
+        .where(documents_table.c.id == document_id)
+        .where(documents_table.c.analysis_session_id == session_id)
+        .where(documents_table.c.content_version == expected_version)
+        .where(documents_table.c.status == "ready")
+        .values(
+            content_version=new_version,
+            storage_path=storage_path,
+            original_filename=filename,
+            size_bytes=len(data_bytes),
+            content_type=detected_type,
+            last_command_idempotency_key=idempotency_key,
+        )
+    )
+    if result.rowcount == 0:
+        # See remove_document's identical comment: rolls back so the
+        # follow-up SELECT observes the current committed row, not a
+        # snapshot pinned before this failed UPDATE.
+        db.rollback()
+        current = (
+            db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
+        )
+        # Each attempt's storage_path is now unique (the nonce above), so
+        # this request's own just-written file can never be the row a
+        # concurrent winner committed — always safe to remove.
+        _remove_orphaned_file(storage_path)
+        if current["last_command_idempotency_key"] == idempotency_key and current["status"] == "ready":
+            return JSONResponse(status_code=200, content=_project(current))
+        return JSONResponse(status_code=409, content=_project(current))
+
+    db.commit()
+    updated = db.execute(select(documents_table).where(documents_table.c.id == document_id)).mappings().one()
+    return JSONResponse(status_code=200, content=_project(updated))
 
 
 def _new_uuid() -> str:

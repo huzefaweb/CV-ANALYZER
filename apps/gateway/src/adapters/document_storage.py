@@ -19,13 +19,25 @@ import os
 DOCUMENT_STORAGE_ROOT = os.environ.get("DOCUMENT_STORAGE_ROOT", "/restricted-source")
 
 
-def store(document_id: str, content_version: int, data: bytes) -> str:
+def store(document_id: str, content_version: int, data: bytes, *, nonce: str = "") -> str:
     """Writes `data` to an opaque path derived only from `document_id`/
     `content_version` (never the original filename, per AR-36) and returns
-    the stored path."""
+    the stored path.
+
+    `nonce`, when given, is appended to the filename. Story 3.3's replace
+    route passes a per-attempt random nonce: two concurrent replace
+    attempts against the same expected_version compute the identical
+    `content_version` for their new write, and without a nonce both would
+    write to the exact same path before either's CAS UPDATE resolves a
+    winner — risking the committed row referencing whichever attempt's
+    bytes physically landed last, not necessarily the DB-declared winner.
+    A unique path per attempt makes that impossible: the winning row's
+    `storage_path` always points at that attempt's own file, verbatim.
+    """
     directory = os.path.join(DOCUMENT_STORAGE_ROOT, document_id)
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"v{content_version}")
+    filename = f"v{content_version}-{nonce}" if nonce else f"v{content_version}"
+    path = os.path.join(directory, filename)
     with open(path, "wb") as f:
         f.write(data)
     return path

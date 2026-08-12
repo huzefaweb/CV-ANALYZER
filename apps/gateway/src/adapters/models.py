@@ -79,3 +79,8 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ready")
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Story 3.3: records the idempotency key of the most recently applied
+    # remove/replace command on this row — a replay marker read back against
+    # the row's own current state, not an insert-race collision backstop
+    # (that's what idempotency_key/its unique index are for).
+    last_command_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
