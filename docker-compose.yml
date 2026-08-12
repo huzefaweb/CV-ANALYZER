@@ -105,6 +105,9 @@ services:
     volumes:
       - ./apps/web:/app
       - /app/node_modules
+      # Keep Next's cache and dev lock off the host bind mount so a host-side
+      # Next process and this container can run without sharing .next/dev/lock.
+      - /app/.next
     depends_on:
       - gateway
 
