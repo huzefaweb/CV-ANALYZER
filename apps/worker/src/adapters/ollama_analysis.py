@@ -23,8 +23,21 @@ from ..domain.analysis_provider import (
     ResumeSourceUnit,
     validate_complete,
 )
+from ..domain.requirement_derivation import RequirementProposal, validate_schema
 
 DEFAULT_MODEL = "qwen2.5:0.5b-instruct"
+
+_REQUIREMENT_SYSTEM_PROMPT = (
+    "You extract Job Requirements from a Job Description. Respond only with "
+    "the requested JSON structure. Each requirement must name exactly one "
+    "component from: mandatory_skills, relevant_experience, "
+    "responsibility_alignment, preferred_skills_tools, "
+    "education_certifications, domain_fit, achievement_evidence_quality. "
+    "Classify each as 'mandatory' or 'preferred'. For each requirement give "
+    "the exact character start/end offsets (0-indexed, end exclusive) of "
+    "the supporting text within the submitted Job Description. Do not "
+    "compute scores, ranks, or hiring decisions."
+)
 
 _SYSTEM_PROMPT = (
     "You evaluate a Resume against Job Requirements. Respond only with the "
@@ -119,6 +132,65 @@ def propose(
 
     try:
         validate_complete(proposal, requirements)
+    except ValueError as exc:
+        raise AnalysisProviderError(FailureReason.MALFORMED) from exc
+
+    return proposal
+
+
+def derive_requirements(
+    job_description_text: str,
+    *,
+    base_url: str,
+    model: str = DEFAULT_MODEL,
+    timeout: float = 60.0,
+) -> RequirementProposal:
+    schema = RequirementProposal.model_json_schema()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _REQUIREMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": job_description_text},
+        ],
+        "format": schema,
+        "stream": False,
+        "options": {"temperature": 0},
+    }
+
+    try:
+        response = httpx.post(f"{base_url}/api/chat", json=payload, timeout=timeout)
+    except httpx.TimeoutException as exc:
+        raise AnalysisProviderError(FailureReason.TIMEOUT) from exc
+    except httpx.RemoteProtocolError as exc:
+        raise AnalysisProviderError(FailureReason.INTERRUPTED) from exc
+    except httpx.TransportError as exc:
+        raise AnalysisProviderError(FailureReason.UNAVAILABLE) from exc
+    except httpx.RequestError as exc:
+        raise AnalysisProviderError(FailureReason.UNAVAILABLE) from exc
+
+    if response.status_code == 429:
+        raise AnalysisProviderError(FailureReason.UNAVAILABLE)
+    if response.status_code >= 500:
+        raise AnalysisProviderError(FailureReason.UNAVAILABLE)
+    if response.status_code >= 400:
+        raise AnalysisProviderError(FailureReason.MALFORMED)
+
+    try:
+        body = response.json()
+        content = body["message"]["content"]
+    except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError, httpx.DecodingError) as exc:
+        raise AnalysisProviderError(FailureReason.MALFORMED) from exc
+
+    if not isinstance(content, str) or not content.strip():
+        raise AnalysisProviderError(FailureReason.REFUSED)
+
+    try:
+        proposal = RequirementProposal.model_validate_json(content)
+    except (ValidationError, json.JSONDecodeError) as exc:
+        raise AnalysisProviderError(FailureReason.MALFORMED) from exc
+
+    try:
+        validate_schema(proposal, job_description_text)
     except ValueError as exc:
         raise AnalysisProviderError(FailureReason.MALFORMED) from exc
 

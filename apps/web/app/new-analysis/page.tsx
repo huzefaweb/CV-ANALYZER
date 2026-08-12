@@ -6,6 +6,21 @@ import { type DocumentProjection } from "./DocumentUpload";
 
 export const dynamic = "force-dynamic";
 
+// Story 3.5: start_preparations.status now cycles through deriving ->
+// validated -> frozen (success) or -> failed (attempt 2 exhausted). No
+// polling is added here (Epic 4 owns Analysis Progress) — this copy only
+// covers what a manual reload can already show.
+function preparationStatusNotice(status: string): string {
+  switch (status) {
+    case "frozen":
+      return "Job Requirements and scoring are frozen. Analysis will proceed once Candidate processing is available.";
+    case "failed":
+      return "Preparation failed and this draft has been unlocked — you can adjust the Job Description or Documents and try Analyze again.";
+    default:
+      return `Analysis preparation is ${status}. New Analysis will be available again once this session finishes.`;
+  }
+}
+
 type DraftProjection = {
   id: string;
   status: string;
@@ -56,9 +71,9 @@ export default async function NewAnalysisPage() {
     return (
       <main id="main">
         <h1>New Analysis</h1>
-        <div className="notice">
+        <div className="notice" aria-live="polite">
           {draft.preparation
-            ? `Analysis preparation is ${draft.preparation.status}. New Analysis will be available again once this session finishes.`
+            ? preparationStatusNotice(draft.preparation.status)
             : "Analysis preparation is in progress. New Analysis will be available again once this session finishes."}
         </div>
         <section aria-labelledby="job-description-locked">

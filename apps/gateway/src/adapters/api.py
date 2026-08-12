@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from .config import load_settings
-from .db import init_engine
+from .db import _SessionLocal, init_engine
 from .document_upload import router as document_upload_router
 from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
+from .preparation_finalizer import scan_and_finalize
 from .workspace import router as workspace_router
 
 # Validated once at process startup (AC#5): a missing secret must fail the
@@ -18,7 +21,44 @@ from .workspace import router as workspace_router
 settings = load_settings()
 init_engine(settings.database_url)
 
-app = FastAPI(title="CV Analyzer Gateway")
+# AR-18: gateway preparation coordinator runs as a stateless, level-triggered
+# scan outside recruiter-request latency — immediate startup scan, then a
+# 2-second cadence. Each iteration opens its own DB session and is offloaded
+# to a thread (SQLAlchemy calls here are synchronous) so it never blocks the
+# event loop serving recruiter requests. A single iteration's exception is
+# logged and swallowed (NFR-13: one failed preparation must not take the
+# whole loop down), matching the worker's own poll-loop discipline.
+_FINALIZER_SCAN_INTERVAL_SECONDS = 2
+
+
+async def _run_finalizer_loop() -> None:
+    while True:
+        try:
+            db = _SessionLocal()
+            try:
+                await asyncio.to_thread(scan_and_finalize, db)
+            finally:
+                # A close()-time failure must not shadow a real scan
+                # exception from the except clause below (review finding).
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
+            print(f"preparation finalizer scan failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(_FINALIZER_SCAN_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    task = asyncio.create_task(_run_finalizer_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)
 
 # workspace_router and new_analysis_router have no adapter-specific routes —
 # mounted unconditionally, unlike identity_router. They still only admit

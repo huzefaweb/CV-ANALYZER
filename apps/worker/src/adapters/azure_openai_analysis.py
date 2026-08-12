@@ -29,3 +29,15 @@ def propose(
     raise AzureOpenAINotConfigured(
         "Azure OpenAI adapter preflight is deferred (AC#1) until AZURE_OPENAI_* env vars are configured."
     )
+
+
+def derive_requirements(
+    job_description_text: str,
+    *,
+    base_url: str,
+    model: str = "",
+    timeout: float = 60.0,
+):
+    raise AzureOpenAINotConfigured(
+        "Azure OpenAI adapter preflight is deferred (AC#1) until AZURE_OPENAI_* env vars are configured."
+    )

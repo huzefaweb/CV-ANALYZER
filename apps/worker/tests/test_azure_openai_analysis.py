@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.adapters.azure_openai_analysis import AzureOpenAINotConfigured, propose
+from src.adapters.azure_openai_analysis import AzureOpenAINotConfigured, derive_requirements, propose
 from src.domain.analysis_provider import JobRequirement, ResumeSourceUnit
 
 
@@ -15,3 +15,8 @@ def test_propose_raises_deferred_not_configured():
             [ResumeSourceUnit(id="unit-1", text="y")],
             base_url="https://example.openai.azure.com/",
         )
+
+
+def test_derive_requirements_raises_deferred_not_configured():
+    with pytest.raises(AzureOpenAINotConfigured):
+        derive_requirements("Job description text", base_url="https://example.openai.azure.com/")

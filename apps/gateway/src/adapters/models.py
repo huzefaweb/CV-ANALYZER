@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -92,8 +92,12 @@ class StartPreparation(Base):
     One row serves as both "the Start Preparation" and "the one logical
     preparation job" AC#1 requires — full lease/fencing columns (AD-6)
     arrive with Story 4.1, once a coordinator actually claims this row.
-    `status` reserves MODELS.md's full sub-state vocabulary; this story only
-    ever writes `"queued"`.
+    `status` reserves MODELS.md's full sub-state vocabulary; Story 3.4 only
+    wrote `"queued"`. Story 3.5 extends the vocabulary this row's `status`
+    actually cycles through: `queued -> deriving -> validated -> frozen`
+    (success) or `queued -> deriving -> queued` (attempt 2) `-> deriving ->
+    failed` (exhausted) — a minimal CAS claim, not full AD-6 lease/fencing
+    (Story 4.1's scope, see 3-5's Dev Notes).
     """
 
     __tablename__ = "start_preparations"
@@ -105,4 +109,88 @@ class StartPreparation(Base):
     document_versions: Mapped[dict] = mapped_column(JSON, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Story 3.5:
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class JobRequirement(Base):
+    """Story 3.5 (AR-10, AD-4): one canonical, frozen Job Requirement."""
+
+    __tablename__ = "job_requirements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    display_id: Mapped[str] = mapped_column(String(8), nullable=False)
+    component: Mapped[str] = mapped_column(String(32), nullable=False)
+    classification: Mapped[str] = mapped_column(String(16), nullable=False)
+    canonical_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_locators: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ScoringConfiguration(Base):
+    """Story 3.5 (AF-6, AD-4): one row per rubric Component, frozen with Revision 1."""
+
+    __tablename__ = "scoring_configurations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    component: Mapped[str] = mapped_column(String(32), nullable=False)
+    applicable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    effective_weight_bps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Candidate(Base):
+    """Story 3.5 (AD-5): one accepted Document slot, stable within its Analysis Session."""
+
+    __tablename__ = "candidates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    document_reference: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AnalysisRevision(Base):
+    """Story 3.5 (AD-5): immutable cohort/publication boundary. This story only ever
+    creates `revision_number=1`; retry-created Revision 2+ is Epic 4+'s scope."""
+
+    __tablename__ = "analysis_revisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="frozen")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RevisionMembership(Base):
+    """Story 3.5 (AD-5): exactly one row per (revision, Candidate). `outcome` reserves
+    the full ReusedResult/NewResult/NeedsReview/Failed vocabulary; this story only
+    ever writes `"queued"` — Epic 4 advances it."""
+
+    __tablename__ = "revision_memberships"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CandidateJob(Base):
+    """Story 3.5 (AR-11): one required Candidate job per membership. This story only
+    ever writes `"queued"` — nothing claims/processes this row until Epic 4."""
+
+    __tablename__ = "candidate_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
