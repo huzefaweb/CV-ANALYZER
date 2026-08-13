@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Integer, Numeric, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -174,6 +174,9 @@ class AnalysisRevision(Base):
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="frozen")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Story 4.6 (AR-19): bumped once per Candidate finalization commit on this
+    # revision; Story 5.1's publication coordinator is the future reader.
+    requested_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class RevisionMembership(Base):
@@ -285,3 +288,56 @@ class CandidateProposal(Base):
     items_json: Mapped[list] = mapped_column(JSON, nullable=False)
     gate_codes: Mapped[list] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CandidateResult(Base):
+    """Story 4.6 (AR-12, AR-19, AR-27): one immutable, append-only Candidate
+    Result Version per finalized `(analysis_revision_id, candidate_id)` —
+    enforced by a unique index, not application logic alone. `outcome` is
+    one of `"NewResult"`/`"NeedsReview"`/`"Failed"` (this story never writes
+    `"ReusedResult"` — that is Story 5.3's retry-revision reuse). Score
+    fields are populated only when `outcome == "NewResult"`; `gate_codes`
+    only when `"NeedsReview"`; `failure_category`/`failure_correlation_reference`
+    only when `"Failed"`. Exact-rational fields (AR-27) are persisted as
+    reduced numerator/positive-denominator `NUMERIC` pairs, never a single
+    float/Decimal column — reconstruct via `Fraction(int(num), int(denom))`.
+    """
+
+    __tablename__ = "candidate_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_job_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    overall_score_bps_numerator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    overall_score_bps_denominator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    mandatory_skills_score_numerator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    mandatory_skills_score_denominator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    relevant_experience_score_numerator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    relevant_experience_score_denominator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    coverage_bps_numerator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    coverage_bps_denominator: Mapped[object | None] = mapped_column(Numeric(), nullable=True)
+    precise_score_percent: Mapped[object | None] = mapped_column(Numeric(5, 2), nullable=True)
+    headline_whole_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    component_contribution_display: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    gate_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_correlation_reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Shortlist(Base):
+    """Story 4.6/AR-33: one Candidate-owned Shortlist state, stable across
+    revisions (never per-membership). This story only ever default-inserts
+    at `state="NotShortlisted"`, `version=1` on first finalization of a
+    Candidate — Story 6.x owns the versioned PUT/DELETE mutation."""
+
+    __tablename__ = "shortlists"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="NotShortlisted")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

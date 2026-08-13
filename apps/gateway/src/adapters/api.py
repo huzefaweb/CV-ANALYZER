@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from .candidate_finalizer import scan_and_finalize_candidates
 from .config import load_settings
 from .db import _SessionLocal, init_engine
 from .document_upload import router as document_upload_router
@@ -75,15 +76,43 @@ async def _run_recovery_sweep_loop() -> None:
         await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
 
 
+# AR-18/AR-19: Candidate finalizer runs on the same stateless,
+# level-triggered pattern as the two loops above — immediate startup scan,
+# then a 2-second cadence (AR-15's general ≤2-second coordinator bound, the
+# same value both existing loops already use).
+_CANDIDATE_FINALIZER_SCAN_INTERVAL_SECONDS = 2
+
+
+async def _run_candidate_finalizer_loop() -> None:
+    while True:
+        try:
+            db = _SessionLocal()
+            try:
+                await asyncio.to_thread(scan_and_finalize_candidates, db)
+            finally:
+                # A close()-time failure must not shadow a real scan
+                # exception from the except clause below (same discipline
+                # as the other two loops' review-fixed close() handling).
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
+            print(f"candidate finalizer scan failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(_CANDIDATE_FINALIZER_SCAN_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     finalizer_task = asyncio.create_task(_run_finalizer_loop())
     sweep_task = asyncio.create_task(_run_recovery_sweep_loop())
+    candidate_finalizer_task = asyncio.create_task(_run_candidate_finalizer_loop())
     try:
         yield
     finally:
         finalizer_task.cancel()
         sweep_task.cancel()
+        candidate_finalizer_task.cancel()
 
 
 app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)
