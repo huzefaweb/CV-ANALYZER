@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .analysis_provider import ResumeSourceUnit
-from .parse_gates import HEADING_KEYWORDS, MAX_HEADING_CHARS
+from .parse_gates import HEADING_KEYWORDS, MAX_HEADING_CHARS, normalize_heading_text
 
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 # ponytail: unanchored, first-match-only heuristic with a bounded ceiling —
@@ -40,13 +40,13 @@ class ExtractedIdentity:
 
 
 def _is_heading(text: str) -> bool:
-    if len(text) > MAX_HEADING_CHARS:
+    lowered = normalize_heading_text(text)
+    if lowered is None:
         return False
-    lowered = text.lower().strip(":•- \t")
     return any(lowered in keywords for keywords in HEADING_KEYWORDS.values())
 
 
-def _extract_name(units: list[ResumeSourceUnit]) -> str | None:
+def extract_name_candidate(units: list[ResumeSourceUnit]) -> str | None:
     if not units:
         return None
     first = units[0].text.strip()
@@ -81,7 +81,7 @@ def extract_identity(
     falls back to Document Reference + current filename (UX-DR10's exact
     fallback content) rather than inventing one."""
     joined_text = "\n".join(u.text for u in units)
-    name = _extract_name(units)
+    name = extract_name_candidate(units)
     email = _extract_email(joined_text)
     phone = _extract_phone(joined_text)
 

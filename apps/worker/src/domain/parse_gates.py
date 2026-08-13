@@ -6,11 +6,15 @@ acceptance-fixtures.md AF-5):
   PARSE_FATAL              - parser could not produce reliable normalized text at all
   TEXT_BELOW_500           - fewer than 500 normalized non-whitespace characters
   COHERENT_BLOCKS_BELOW_2  - fewer than 2 coherent content blocks
+  COVERAGE_BELOW_7000_BPS  - evaluated coverage below 7,000 effective basis points
 
-`COVERAGE_BELOW_7000_BPS` (the criterion-coverage gate) is out of scope for
-this story — it depends on rubric/scoring machinery a later epic introduces.
+`COVERAGE_BELOW_7000_BPS` has two producers sharing one Recruiter-visible
+meaning (AD-9/AD-11/AR-26): Story 4.3's pre-provider-call token-budget
+overflow (`apps/worker/src/domain/analysis_view.check_budget`) is the first;
+post-provider criterion-coverage scoring (Story 4.5+) is the second. Neither
+producer lives in this module — this enum is only the shared vocabulary.
 AI output cannot set, clear, or override any of these codes; they are derived
-here purely from parser-delineated structure.
+here purely from parser-delineated structure or deterministic budget math.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ class GateCode(str, Enum):
     PARSE_FATAL = "PARSE_FATAL"
     TEXT_BELOW_500 = "TEXT_BELOW_500"
     COHERENT_BLOCKS_BELOW_2 = "COHERENT_BLOCKS_BELOW_2"
+    COVERAGE_BELOW_7000_BPS = "COVERAGE_BELOW_7000_BPS"
 
 
 class ParseFatalError(Exception):
@@ -103,10 +108,21 @@ HEADING_KEYWORDS: dict[str, tuple[str, ...]] = {
 MAX_HEADING_CHARS = 60
 
 
-def _match_heading(text: str) -> str | None:
+def normalize_heading_text(text: str) -> str | None:
+    """Shared heading-normalization rule (length bound + case/punctuation
+    strip): `None` if `text` is too long to be a heading at all, else the
+    lowered/stripped comparison form. Reused by `identity_extraction.py` and
+    `analysis_view.py` so all three heading-detection call sites can't
+    silently drift apart into three slightly different rules."""
     if len(text) > MAX_HEADING_CHARS:
         return None
-    lowered = text.lower().strip(":•- \t")
+    return text.lower().strip(":•- \t")
+
+
+def _match_heading(text: str) -> str | None:
+    lowered = normalize_heading_text(text)
+    if lowered is None:
+        return None
     for content_class, keywords in HEADING_KEYWORDS.items():
         if lowered in keywords:
             return content_class
