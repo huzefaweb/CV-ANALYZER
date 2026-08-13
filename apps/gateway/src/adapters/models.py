@@ -219,3 +219,46 @@ class CandidateJob(Base):
     reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class ParseArtifact(Base):
+    """Story 4.2 (AD-8, AR-21): one immutable parse artifact per (Document,
+    content version, parser/pipeline version) — append-only, never
+    overwritten (enforced by a unique index on that triple, not application
+    logic alone). `source_units_json` is AR-21's secured locator map
+    (`ResumeSourceUnit`/`Locator` shape verbatim); `blocks_json` is the
+    non-AI content-class grouping (`parse_gates.classify_blocks`); neither
+    ever carries identity/contact content (that lives in
+    `CandidateIdentity`, joined only for authorized display, AD-9)."""
+
+    __tablename__ = "parse_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    document_content_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    parser_pipeline_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_units_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    blocks_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    gate_codes: Mapped[list] = mapped_column(JSON, nullable=False)
+    coherent_block_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CandidateIdentity(Base):
+    """Story 4.2 (AD-9): one display-only identity/contact record per
+    Candidate, upserted on re-parse. Joined only for authorized display
+    (creator-through-session re-check at read time, AR-8) — never read into
+    any provider/scoring/ranking input path. `name_source` distinguishes a
+    genuinely parsed name from the Document Reference/filename fallback
+    (UX-DR10)."""
+
+    __tablename__ = "candidate_identities"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    name_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
