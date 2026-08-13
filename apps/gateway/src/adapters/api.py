@@ -14,6 +14,7 @@ from .document_upload import router as document_upload_router
 from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
 from .preparation_finalizer import scan_and_finalize
+from .recovery_sweep import sweep_stale
 from .workspace import router as workspace_router
 
 # Validated once at process startup (AC#5): a missing secret must fail the
@@ -49,13 +50,40 @@ async def _run_finalizer_loop() -> None:
         await asyncio.sleep(_FINALIZER_SCAN_INTERVAL_SECONDS)
 
 
+# AR-15/AR-18: recovery sweep runs on the same stateless, level-triggered
+# pattern as the finalizer loop above — immediate startup scan, then a
+# 2-second cadence (AD-6's "recovery sweep no slower than 2 seconds").
+_SWEEP_INTERVAL_SECONDS = 2
+
+
+async def _run_recovery_sweep_loop() -> None:
+    while True:
+        try:
+            db = _SessionLocal()
+            try:
+                await asyncio.to_thread(sweep_stale, db)
+            finally:
+                # A close()-time failure must not shadow a real sweep
+                # exception from the except clause below (same discipline
+                # as _run_finalizer_loop's review-fixed close() handling).
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
+            print(f"recovery sweep failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task = asyncio.create_task(_run_finalizer_loop())
+    finalizer_task = asyncio.create_task(_run_finalizer_loop())
+    sweep_task = asyncio.create_task(_run_recovery_sweep_loop())
     try:
         yield
     finally:
-        task.cancel()
+        finalizer_task.cancel()
+        sweep_task.cancel()
 
 
 app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)

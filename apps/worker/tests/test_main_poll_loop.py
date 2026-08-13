@@ -8,6 +8,7 @@ wiring, now covered).
 from __future__ import annotations
 
 import os
+import time
 import uuid
 
 import psycopg
@@ -109,3 +110,25 @@ def test_process_one_terminal_failure_unlocks_session(conn, monkeypatch):
         "SELECT status FROM analysis_sessions WHERE id = %s", (session_id,)
     ).fetchone()[0]
     assert session_status == "draft"
+
+
+def test_heartbeat_keeps_lease_alive_across_a_slow_provider_call(conn, monkeypatch):
+    """A short lease (1s) with a fast heartbeat (0.3s) and a fake provider
+    call slower than the original lease (1.5s) — without the heartbeat
+    thread, the lease would expire mid-call and `stage_success`'s fencing
+    predicate would reject the write (AD-6: processing occurs outside claim
+    transactions, but the lease must survive that processing)."""
+    _, prep_id = _seed_session_and_preparation(conn)
+    monkeypatch.setattr(preparation_claim, "LEASE_SECONDS", 1)
+    monkeypatch.setattr(main, "HEARTBEAT_SECONDS", 0.3)
+
+    def slow_derive(job_description_text, *, base_url, model=None, timeout=60.0):
+        time.sleep(1.5)
+        return RequirementProposal(items=[])
+
+    monkeypatch.setattr(ollama_analysis, "derive_requirements", slow_derive)
+
+    claimed = main._process_one(conn, _settings())
+    assert claimed is True
+    status = conn.execute("SELECT status FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()[0]
+    assert status == "validated"

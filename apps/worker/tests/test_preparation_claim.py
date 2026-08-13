@@ -1,8 +1,9 @@
-"""Real-PostgreSQL tests for the minimal-CAS start_preparations claim loop
-(Story 3.5). Skipped (not failed) when WORKER_DATABASE_URL is unset, mirrors
+"""Real-PostgreSQL tests for the full AD-6 lease/fencing start_preparations
+claim loop (Story 4.1, retrofitting Story 3.5's minimal-CAS claim). Skipped
+(not failed) when WORKER_DATABASE_URL is unset, mirrors
 test_job_lease_restart_recovery.py's pattern. Precondition: `docker compose
 up -d postgres`, gateway migrations applied (creates start_preparations /
-analysis_sessions).
+analysis_sessions with lease columns).
 """
 
 from __future__ import annotations
@@ -57,13 +58,21 @@ def _seed_session_and_preparation(conn, *, attempt: int = 1) -> tuple[str, str]:
     return session_id, prep_id
 
 
-def test_claim_transitions_queued_to_deriving(conn):
+def test_claim_transitions_queued_to_deriving_with_fresh_lease(conn):
     _, prep_id = _seed_session_and_preparation(conn)
     claimed = preparation_claim.claim_queued(conn)
     assert claimed is not None
     assert claimed.id == prep_id
-    status = conn.execute("SELECT status FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()[0]
-    assert status == "deriving"
+    assert claimed.generation == 1
+    assert len(claimed.token) == 32
+    row = conn.execute(
+        "SELECT status, generation, lease_token, lease_expires_at > now() FROM start_preparations WHERE id = %s",
+        (prep_id,),
+    ).fetchone()
+    assert row[0] == "deriving"
+    assert row[1] == 1
+    assert row[2] == claimed.token
+    assert row[3] is True
 
 
 def test_concurrent_claim_never_double_claims(conn):
@@ -80,22 +89,55 @@ def test_concurrent_claim_never_double_claims(conn):
     assert len(claimed) == 1
 
 
+def test_heartbeat_extends_lease(conn):
+    _, prep_id = _seed_session_and_preparation(conn)
+    claimed = preparation_claim.claim_queued(conn)
+    before = conn.execute("SELECT lease_expires_at FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()[0]
+    conn.execute("UPDATE start_preparations SET lease_expires_at = now() + interval '1 second' WHERE id = %s", (prep_id,))
+    ok = preparation_claim.heartbeat(conn, prep_id, claimed.generation, claimed.token)
+    assert ok is True
+    after = conn.execute("SELECT lease_expires_at FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()[0]
+    assert after > before
+
+
+def test_heartbeat_fails_on_stale_generation(conn):
+    _, prep_id = _seed_session_and_preparation(conn)
+    claimed = preparation_claim.claim_queued(conn)
+    # Simulate a sweep-triggered reclaim between two heartbeats: generation
+    # rotates, the old claimant's token no longer matches.
+    conn.execute("UPDATE start_preparations SET generation = generation + 1 WHERE id = %s", (prep_id,))
+    ok = preparation_claim.heartbeat(conn, prep_id, claimed.generation, claimed.token)
+    assert ok is False
+
+
 def test_stage_success_writes_proposal_and_validated_status(conn):
     _, prep_id = _seed_session_and_preparation(conn)
-    preparation_claim.claim_queued(conn)
-    ok = preparation_claim.stage_success(conn, prep_id, {"items": []})
+    claimed = preparation_claim.claim_queued(conn)
+    ok = preparation_claim.stage_success(conn, prep_id, claimed.generation, claimed.token, {"items": []})
     assert ok is True
     row = conn.execute(
-        "SELECT status, proposal_json FROM start_preparations WHERE id = %s", (prep_id,)
+        "SELECT status, proposal_json, state_version FROM start_preparations WHERE id = %s", (prep_id,)
     ).fetchone()
     assert row[0] == "validated"
     assert row[1] == {"items": []}
+    assert row[2] == 1
+
+
+def test_stage_success_rejects_stale_generation_or_token(conn):
+    _, prep_id = _seed_session_and_preparation(conn)
+    claimed = preparation_claim.claim_queued(conn)
+    ok = preparation_claim.stage_success(conn, prep_id, claimed.generation, "wrong-token", {"items": []})
+    assert ok is False
+    row = conn.execute("SELECT status FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()
+    assert row[0] == "deriving"
 
 
 def test_stage_failure_with_attempt_1_requeues_with_attempt_2(conn):
     session_id, prep_id = _seed_session_and_preparation(conn, attempt=1)
     claimed = preparation_claim.claim_queued(conn)
-    ok = preparation_claim.stage_failure(conn, prep_id, session_id, claimed.attempt, "timeout")
+    ok = preparation_claim.stage_failure(
+        conn, prep_id, session_id, claimed.attempt, claimed.generation, claimed.token, "timeout"
+    )
     assert ok is True
     row = conn.execute("SELECT status, attempt FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()
     assert row[0] == "queued"
@@ -110,7 +152,9 @@ def test_stage_failure_with_attempt_1_requeues_with_attempt_2(conn):
 def test_stage_failure_with_attempt_2_terminates_failed_and_unlocks_session(conn):
     session_id, prep_id = _seed_session_and_preparation(conn, attempt=2)
     claimed = preparation_claim.claim_queued(conn)
-    ok = preparation_claim.stage_failure(conn, prep_id, session_id, claimed.attempt, "timeout")
+    ok = preparation_claim.stage_failure(
+        conn, prep_id, session_id, claimed.attempt, claimed.generation, claimed.token, "timeout"
+    )
     assert ok is True
     row = conn.execute("SELECT status FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()
     assert row[0] == "failed"
@@ -120,6 +164,18 @@ def test_stage_failure_with_attempt_2_terminates_failed_and_unlocks_session(conn
         "SELECT status FROM analysis_sessions WHERE id = %s", (session_id,)
     ).fetchone()[0]
     assert session_status == "draft"
+
+
+def test_stage_failure_rejects_stale_generation_or_token(conn):
+    session_id, prep_id = _seed_session_and_preparation(conn, attempt=1)
+    claimed = preparation_claim.claim_queued(conn)
+    ok = preparation_claim.stage_failure(
+        conn, prep_id, session_id, claimed.attempt, claimed.generation, "wrong-token", "timeout"
+    )
+    assert ok is False
+    row = conn.execute("SELECT status, attempt FROM start_preparations WHERE id = %s", (prep_id,)).fetchone()
+    assert row[0] == "deriving"
+    assert row[1] == 1
 
 
 def test_fetch_job_description_text(conn):

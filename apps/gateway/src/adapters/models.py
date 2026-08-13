@@ -90,14 +90,15 @@ class StartPreparation(Base):
     """Story 3.4 (AR-9, AR-10): the persisted lock created by `Analyze`.
 
     One row serves as both "the Start Preparation" and "the one logical
-    preparation job" AC#1 requires — full lease/fencing columns (AD-6)
-    arrive with Story 4.1, once a coordinator actually claims this row.
-    `status` reserves MODELS.md's full sub-state vocabulary; Story 3.4 only
-    wrote `"queued"`. Story 3.5 extends the vocabulary this row's `status`
-    actually cycles through: `queued -> deriving -> validated -> frozen`
-    (success) or `queued -> deriving -> queued` (attempt 2) `-> deriving ->
-    failed` (exhausted) — a minimal CAS claim, not full AD-6 lease/fencing
-    (Story 4.1's scope, see 3-5's Dev Notes).
+    preparation job" AC#1 requires. `status` reserves MODELS.md's full
+    sub-state vocabulary; Story 3.4 only wrote `"queued"`. Story 3.5 extends
+    the vocabulary this row's `status` actually cycles through: `queued ->
+    deriving -> validated -> frozen` (success) or `queued -> deriving ->
+    queued` (attempt 2) `-> deriving -> failed` (exhausted). Story 4.1 adds
+    full AD-6 lease/fencing (`generation`/`lease_token`/`lease_expires_at`/
+    `state_version`/`reclaim_count`) on top of that same status cycle —
+    every worker mutation now also fences on generation+token, not status
+    alone.
     """
 
     __tablename__ = "start_preparations"
@@ -114,6 +115,12 @@ class StartPreparation(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Story 4.1 (AD-6): lease/fencing.
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class JobRequirement(Base):
@@ -184,8 +191,18 @@ class RevisionMembership(Base):
 
 
 class CandidateJob(Base):
-    """Story 3.5 (AR-11): one required Candidate job per membership. This story only
-    ever writes `"queued"` — nothing claims/processes this row until Epic 4."""
+    """Story 3.5 (AR-11): one required Candidate job per membership. Story
+    4.1 (AD-6) adds full lease/fencing (`generation`/`lease_token`/
+    `lease_expires_at`/`state_version`/`reclaim_count`) plus `attempt`/
+    `failure_reason`, mirroring `StartPreparation`'s columns, and widens
+    `status` to also carry `"claimed"` (worker holds an active lease). A
+    lease-exhausted job here (`status="failed"`) is this story's AD-6
+    job-lease terminal state — a distinct, earlier-layer concept from
+    `revision_memberships.outcome="Failed"`, the authoritative membership
+    outcome only Story 4.6's Candidate finalizer ever commits. Claim
+    mechanics exist and are tested against this table (`candidate_claim.py`)
+    but nothing in production calls them yet — no real parse/provider work
+    exists to run until Story 4.2+."""
 
     __tablename__ = "candidate_jobs"
 
@@ -194,3 +211,11 @@ class CandidateJob(Base):
     candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Story 4.1 (AD-6): lease/fencing + attempt budget.
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
