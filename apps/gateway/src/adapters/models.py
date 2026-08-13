@@ -262,3 +262,26 @@ class CandidateIdentity(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CandidateProposal(Base):
+    """Story 4.4 (AD-8, AR-24, AR-40): one immutable provider proposal per
+    Candidate job, staged only after `validate_complete`/`validate_locators`
+    pass (or, on token-budget overflow, an empty `items_json` with
+    `gate_codes=["COVERAGE_BELOW_7000_BPS"]` and no provider call at all —
+    Story 4.3's `check_budget`, finally consumed here). Same
+    exactly-once-per-job shape as `ParseArtifact`: a unique index on
+    `candidate_job_id` makes a duplicate fenced write for the same job a
+    no-op, never a second row. The worker only ever inserts here — scoring
+    (Story 4.5) and terminalization (Story 4.6) are what read this table,
+    never this module."""
+
+    __tablename__ = "candidate_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_job_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    items_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    gate_codes: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

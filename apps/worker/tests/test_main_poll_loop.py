@@ -59,7 +59,9 @@ def _seed_session_and_preparation(conn, *, attempt: int = 1) -> tuple[str, str]:
 
 
 def _settings() -> Settings:
-    return Settings(database_url=WORKER_DATABASE_URL, ollama_host="http://ollama.invalid:11434", azure_openai_configured=False)
+    return Settings(
+        database_url=WORKER_DATABASE_URL, ollama_host="http://ollama.invalid:11434", azure_openai_configured=False
+    )
 
 
 def test_process_one_returns_false_when_nothing_queued(conn):

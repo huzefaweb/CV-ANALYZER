@@ -31,6 +31,14 @@ MAX_ATTEMPTS = 2
 _LEASED_TABLES: tuple[tuple[str, str, str], ...] = (
     ("start_preparations", "deriving", "queued"),
     ("candidate_jobs", "claimed", "queued"),
+    # Story 4.4: `'parsed'` is the mid-attempt checkpoint after a successful
+    # parse but before provider-phase staging -- the lease stays held
+    # (candidate_claim.stage_parse_success never clears it), so a worker
+    # crash here must be reclaimable the same way a `'claimed'` row is. A
+    # full re-attempt (back to `'queued'`) simply redoes the idempotent
+    # parse (parse_artifacts' ON CONFLICT DO NOTHING) before retrying the
+    # provider call -- no separate resume path is needed.
+    ("candidate_jobs", "parsed", "queued"),
 )
 
 

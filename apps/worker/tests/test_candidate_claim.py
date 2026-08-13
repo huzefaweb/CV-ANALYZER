@@ -29,7 +29,8 @@ pytestmark = pytest.mark.skipif(
 def conn():
     connection = psycopg.connect(WORKER_DATABASE_URL, autocommit=True)
     connection.execute(
-        "TRUNCATE TABLE candidate_jobs, parse_artifacts, candidate_identities RESTART IDENTITY CASCADE"
+        "TRUNCATE TABLE candidate_jobs, parse_artifacts, candidate_identities, candidate_proposals "
+        "RESTART IDENTITY CASCADE"
     )
     yield connection
     connection.close()
@@ -279,6 +280,135 @@ def test_stage_parse_success_does_not_regress_parsed_name_to_fallback(conn):
     # Name stays the genuinely parsed one; email stays the previously known
     # value rather than being nulled out by an attempt that found none.
     assert identity == ("Jordan Rivera", "parsed", "jordan@example.com")
+
+
+def _seed_parsed_job(conn, *, attempt: int = 1) -> tuple[str, str, int, str]:
+    """Seeds a job through claim -> stage_parse_success, landing it at
+    status='parsed' with its lease still held -- the starting point for the
+    provider-phase staging functions."""
+    job_id = _seed_candidate_job(conn, attempt=attempt)
+    claimed = candidate_claim.claim_queued(conn)
+    candidate_id = claimed.candidate_id
+    candidate_claim.stage_parse_success(
+        conn, job_id, claimed.generation, claimed.token,
+        **_stage_parse_success_kwargs(candidate_id, str(uuid.uuid4())),
+    )
+    return job_id, candidate_id, claimed.generation, claimed.token
+
+
+def test_stage_provider_success_persists_proposal_and_advances_status(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+    analysis_revision_id = str(uuid.uuid4())
+    items = [{"job_requirement_id": "JR-1", "state": "Matched", "locator": "unit-1", "excerpt": "x"}]
+
+    ok = candidate_claim.stage_provider_success(
+        conn, job_id, generation, token,
+        candidate_id=candidate_id, analysis_revision_id=analysis_revision_id,
+        items_json=items, gate_codes=[],
+    )
+    assert ok is True
+
+    status = conn.execute("SELECT status FROM candidate_jobs WHERE id = %s", (job_id,)).fetchone()[0]
+    assert status == "completed"
+
+    row = conn.execute(
+        "SELECT candidate_id, analysis_revision_id, items_json, gate_codes FROM candidate_proposals WHERE candidate_job_id = %s",
+        (job_id,),
+    ).fetchone()
+    assert row[0] == candidate_id
+    assert row[1] == analysis_revision_id
+    assert row[2] == items
+    assert row[3] == []
+
+
+def test_stage_provider_success_budget_overflow_stages_coverage_gate_code(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+
+    ok = candidate_claim.stage_provider_success(
+        conn, job_id, generation, token,
+        candidate_id=candidate_id, analysis_revision_id=str(uuid.uuid4()),
+        items_json=[], gate_codes=["COVERAGE_BELOW_7000_BPS"],
+    )
+    assert ok is True
+
+    row = conn.execute(
+        "SELECT items_json, gate_codes FROM candidate_proposals WHERE candidate_job_id = %s", (job_id,)
+    ).fetchone()
+    assert row[0] == []
+    assert row[1] == ["COVERAGE_BELOW_7000_BPS"]
+
+
+def test_stage_provider_success_duplicate_delivery_does_not_duplicate_proposal(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+    kwargs = dict(candidate_id=candidate_id, analysis_revision_id=str(uuid.uuid4()), items_json=[], gate_codes=[])
+
+    candidate_claim.stage_provider_success(conn, job_id, generation, token, **kwargs)
+    conn.execute(
+        "UPDATE candidate_jobs SET status = 'parsed', generation = generation + 1, "
+        "lease_token = 'dup-token', lease_expires_at = now() + interval '12 seconds' WHERE id = %s",
+        (job_id,),
+    )
+    new_generation = conn.execute("SELECT generation FROM candidate_jobs WHERE id = %s", (job_id,)).fetchone()[0]
+
+    ok = candidate_claim.stage_provider_success(conn, job_id, new_generation, "dup-token", **kwargs)
+    assert ok is True
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM candidate_proposals WHERE candidate_job_id = %s", (job_id,)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_stage_provider_success_rejects_stale_fence_and_changes_nothing(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+    conn.execute("UPDATE candidate_jobs SET generation = generation + 1 WHERE id = %s", (job_id,))
+
+    ok = candidate_claim.stage_provider_success(
+        conn, job_id, generation, token,
+        candidate_id=candidate_id, analysis_revision_id=str(uuid.uuid4()), items_json=[], gate_codes=[],
+    )
+    assert ok is False
+
+    status = conn.execute("SELECT status FROM candidate_jobs WHERE id = %s", (job_id,)).fetchone()[0]
+    assert status == "parsed"
+    count = conn.execute(
+        "SELECT COUNT(*) FROM candidate_proposals WHERE candidate_job_id = %s", (job_id,)
+    ).fetchone()[0]
+    assert count == 0
+
+
+def test_stage_provider_failure_requeues_on_attempt_1(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn, attempt=1)
+    ok = candidate_claim.stage_provider_failure(conn, job_id, 1, generation, token, "Analysis timed out")
+    assert ok is True
+    row = conn.execute(
+        "SELECT status, attempt, failure_reason, lease_token FROM candidate_jobs WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row == ("queued", 2, "Analysis timed out", None)
+
+
+def test_stage_provider_failure_terminates_after_max_attempts(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn, attempt=2)
+    ok = candidate_claim.stage_provider_failure(conn, job_id, 2, generation, token, "Analysis timed out")
+    assert ok is True
+    status = conn.execute("SELECT status FROM candidate_jobs WHERE id = %s", (job_id,)).fetchone()[0]
+    assert status == "failed"
+
+
+def test_stage_provider_failure_rejects_stale_fence(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+    conn.execute("UPDATE candidate_jobs SET generation = generation + 1 WHERE id = %s", (job_id,))
+    ok = candidate_claim.stage_provider_failure(conn, job_id, 1, generation, token, "Analysis timed out")
+    assert ok is False
+    status = conn.execute("SELECT status FROM candidate_jobs WHERE id = %s", (job_id,)).fetchone()[0]
+    assert status == "parsed"
+
+
+def test_heartbeat_succeeds_while_status_is_parsed(conn):
+    job_id, candidate_id, generation, token = _seed_parsed_job(conn)
+    conn.execute("UPDATE candidate_jobs SET lease_expires_at = now() + interval '1 second' WHERE id = %s", (job_id,))
+    ok = candidate_claim.heartbeat(conn, job_id, generation, token)
+    assert ok is True
 
 
 def test_stage_parse_success_truncates_oversized_display_name(conn):

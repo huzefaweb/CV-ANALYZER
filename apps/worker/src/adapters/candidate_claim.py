@@ -75,14 +75,19 @@ def claim_queued(conn: Connection) -> ClaimedCandidateJob | None:
 
 def heartbeat(conn: Connection, job_id: str, generation: int, token: str) -> bool:
     """Extend the lease. Fails (returns False, changes nothing) if
-    generation/token/active-lease no longer match (AD-6 fencing)."""
+    generation/token/active-lease no longer match (AD-6 fencing).
+
+    Story 4.4: `status` may be `'claimed'` (parse phase) or `'parsed'`
+    (provider phase) -- `stage_parse_success` advances status without
+    releasing the lease, so one continuous attempt's heartbeat must keep
+    succeeding across both phases, not just the first."""
     with conn.transaction():
         cur = conn.execute(
             f"""
             UPDATE candidate_jobs
             SET lease_expires_at = now() + interval '{LEASE_SECONDS} seconds'
             WHERE id = %s AND generation = %s AND lease_token = %s
-              AND status = 'claimed' AND lease_expires_at > now()
+              AND status IN ('claimed', 'parsed') AND lease_expires_at > now()
             """,
             (job_id, generation, token),
         )
@@ -180,6 +185,104 @@ def stage_parse_success(
         return True
 
 
+def stage_provider_success(
+    conn: Connection,
+    job_id: str,
+    generation: int,
+    token: str,
+    *,
+    candidate_id: str,
+    analysis_revision_id: str,
+    items_json: list,
+    gate_codes: list[str],
+) -> bool:
+    """CAS: fenced on generation+token+active lease, requiring `status =
+    'parsed'` (the parse checkpoint this attempt already reached) rather
+    than `'claimed'` -- the provider phase of the same continuous attempt
+    (AC#3). `items_json=[]`/`gate_codes=["COVERAGE_BELOW_7000_BPS"]` records
+    a token-budget overflow (Story 4.3's `check_budget`, no provider call
+    made); otherwise `items_json` is the validated `AnalysisProposal.items`
+    and `gate_codes=[]`. `'completed'` is a worker-owned bookkeeping status,
+    distinct from `revision_memberships.outcome` (only Story 4.6's gateway
+    finalizer ever writes that). The `candidate_proposals` insert is
+    `ON CONFLICT (candidate_job_id) DO NOTHING` -- a duplicate fenced write
+    for the same job (e.g. re-delivered after a sweep reclaim) creates no
+    second proposal (AC#3)."""
+    with conn.transaction():
+        cur = conn.execute(
+            """
+            UPDATE candidate_jobs
+            SET status = 'completed', state_version = state_version + 1
+            WHERE id = %s AND generation = %s AND lease_token = %s
+              AND status = 'parsed' AND lease_expires_at > now()
+            """,
+            (job_id, generation, token),
+        )
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            """
+            INSERT INTO candidate_proposals (
+                id, candidate_job_id, candidate_id, analysis_revision_id,
+                items_json, gate_codes, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (candidate_job_id) DO NOTHING
+            """,
+            (
+                str(uuid.uuid4()),
+                job_id,
+                candidate_id,
+                analysis_revision_id,
+                json.dumps(items_json),
+                json.dumps(gate_codes),
+            ),
+        )
+        return True
+
+
+def stage_provider_failure(
+    conn: Connection,
+    job_id: str,
+    attempt: int,
+    generation: int,
+    token: str,
+    failure_reason: str,
+) -> bool:
+    """CAS: requeue for another attempt if attempts remain, else terminate
+    `'failed'`. Fenced on generation+token+active lease requiring `status =
+    'parsed'` (identical shape to `stage_parse_failure`, but for the
+    provider phase of an attempt that already reached the parse checkpoint).
+    Requeuing goes back to `'queued'` -- attempt 2 redoes the (idempotent)
+    parse before retrying the provider call, rather than needing a
+    parse-skipping resume path."""
+    reason = failure_reason[:64]
+    with conn.transaction():
+        if attempt < MAX_ATTEMPTS:
+            cur = conn.execute(
+                """
+                UPDATE candidate_jobs
+                SET status = 'queued', attempt = attempt + 1, failure_reason = %s,
+                    state_version = state_version + 1, reclaim_count = 0,
+                    lease_token = NULL, lease_expires_at = NULL
+                WHERE id = %s AND generation = %s AND lease_token = %s
+                  AND status = 'parsed' AND lease_expires_at > now()
+                """,
+                (reason, job_id, generation, token),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE candidate_jobs
+                SET status = 'failed', failure_reason = %s, state_version = state_version + 1
+                WHERE id = %s AND generation = %s AND lease_token = %s
+                  AND status = 'parsed' AND lease_expires_at > now()
+                """,
+                (reason, job_id, generation, token),
+            )
+        return cur.rowcount == 1
+
+
 def stage_parse_failure(
     conn: Connection,
     job_id: str,
@@ -200,7 +303,7 @@ def stage_parse_failure(
                 """
                 UPDATE candidate_jobs
                 SET status = 'queued', attempt = attempt + 1, failure_reason = %s,
-                    state_version = state_version + 1,
+                    state_version = state_version + 1, reclaim_count = 0,
                     lease_token = NULL, lease_expires_at = NULL
                 WHERE id = %s AND generation = %s AND lease_token = %s
                   AND status = 'claimed' AND lease_expires_at > now()

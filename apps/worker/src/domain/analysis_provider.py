@@ -109,6 +109,18 @@ def validate_complete(proposal: AnalysisProposal, requirements: list[JobRequirem
         )
 
 
+def validate_locators(proposal: AnalysisProposal, permitted_units: list[ResumeSourceUnit]) -> None:
+    """Raise ValueError if any non-empty `locator` names a source unit id
+    outside `permitted_units` (AR-25). A 'Not Found' item legitimately
+    carries an empty locator (per the system prompt's own instruction) —
+    only a *foreign* locator (naming Evidence the request never permitted
+    the provider to see) is rejected here."""
+    permitted_ids = {u.id for u in permitted_units}
+    for item in proposal.items:
+        if item.locator and item.locator not in permitted_ids:
+            raise ValueError(f"locator {item.locator!r} does not name a permitted source unit")
+
+
 class FailureReason(str, Enum):
     """Adapter-internal classification, translated from provider/transport specifics."""
 

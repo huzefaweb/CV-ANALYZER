@@ -20,6 +20,7 @@ from src.domain.analysis_provider import (
     Span,
     map_failure,
     validate_complete,
+    validate_locators,
 )
 
 
@@ -94,6 +95,30 @@ def test_validate_complete_rejects_extra_requirement():
     )
     with pytest.raises(ValueError, match="extra"):
         validate_complete(proposal, requirements)
+
+
+def test_validate_locators_accepts_locator_matching_permitted_unit():
+    units = [ResumeSourceUnit(id="unit-1", text="Backend engineer.")]
+    proposal = AnalysisProposal(
+        items=[ProposalItem(job_requirement_id="JR-1", state=AnalysisState.MATCHED, locator="unit-1")]
+    )
+    validate_locators(proposal, units)  # should not raise
+
+
+def test_validate_locators_accepts_empty_locator_on_not_found():
+    proposal = AnalysisProposal(
+        items=[ProposalItem(job_requirement_id="JR-1", state=AnalysisState.NOT_FOUND, locator="")]
+    )
+    validate_locators(proposal, [])  # should not raise
+
+
+def test_validate_locators_rejects_unknown_locator():
+    units = [ResumeSourceUnit(id="unit-1", text="Backend engineer.")]
+    proposal = AnalysisProposal(
+        items=[ProposalItem(job_requirement_id="JR-1", state=AnalysisState.MATCHED, locator="unit-99")]
+    )
+    with pytest.raises(ValueError, match="unit-99"):
+        validate_locators(proposal, units)
 
 
 def test_all_five_failure_categories_are_frozen_and_distinct():

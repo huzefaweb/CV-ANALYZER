@@ -225,6 +225,46 @@ def test_candidate_job_reclaimed_once_then_requeued_attempt_2_then_terminates(db
     assert row.status == "failed"
 
 
+def test_candidate_job_parsed_status_reclaimed_to_queued(db):
+    """Story 4.4: a `'parsed'` row (mid-attempt checkpoint, lease still
+    held) whose lease expires — e.g. worker crash between the parse
+    checkpoint and provider-phase staging — must be reclaimed the same way
+    a `'claimed'` row is, not left permanently stuck (claim_queued only
+    ever selects `'queued'`)."""
+    job_id = str(uuid.uuid4())
+    db.add(
+        CandidateJob(
+            id=job_id,
+            analysis_revision_id=str(uuid.uuid4()),
+            candidate_id=str(uuid.uuid4()),
+            status="parsed",
+            created_at=datetime.now(timezone.utc),
+            attempt=1,
+            generation=1,
+            reclaim_count=0,
+        )
+    )
+    db.commit()
+    db.execute(
+        text(
+            "UPDATE candidate_jobs SET lease_token = 'stale-token', "
+            "lease_expires_at = now() - interval '1 second' WHERE id = :id"
+        ),
+        {"id": job_id},
+    )
+    db.commit()
+
+    sweep_stale(db)
+    row = db.execute(
+        text("SELECT status, generation, reclaim_count, lease_token FROM candidate_jobs WHERE id = :id"),
+        {"id": job_id},
+    ).fetchone()
+    assert row.status == "queued"
+    assert row.generation == 2
+    assert row.reclaim_count == 1
+    assert row.lease_token is None
+
+
 def test_row_with_null_lease_expires_at_is_reclaimed(db):
     """A row with status='deriving' but lease_expires_at IS NULL (e.g. a
     pre-migration row that predates lease columns existing) must not be

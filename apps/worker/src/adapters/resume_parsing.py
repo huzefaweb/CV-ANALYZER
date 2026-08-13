@@ -19,6 +19,13 @@ from .pdf_parser import parse_pdf
 PDF_CONTENT_TYPE = "application/pdf"
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+# Recorded verbatim into parse_artifacts.parser_pipeline_version (Story
+# 4.2's uniqueness key, Story 4.4's first writer) -- bump only if
+# pdf_parser.py/docx_parser.py's extraction rules change materially enough
+# that a re-parse under the same Document content version should be treated
+# as a distinct artifact.
+PARSER_PIPELINE_VERSION = "v1"
+
 
 def parse_resume(data: bytes, content_type: str) -> list[ResumeSourceUnit]:
     """Dispatches to the matching parser. AF-2's intake gate already
