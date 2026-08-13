@@ -25,6 +25,17 @@ const nextConfig: NextConfig = {
         source: "/new-analysis",
         headers: [{ key: "Cache-Control", value: "no-store" }],
       },
+      // Story 4.7 (review finding): the polled Progress projection is
+      // fetched far more frequently than the other API routes and carries
+      // the same protected-content sensitivity as its parent `/workspace`
+      // page — give it the same explicit no-store defense-in-depth rather
+      // than relying solely on `cookies()`-triggered dynamic rendering.
+      // The other `/api/*` routes' identical gap is pre-existing, not
+      // introduced by this story, and stays out of this diff's scope.
+      {
+        source: "/api/workspace/:path*",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
     ];
   },
 };

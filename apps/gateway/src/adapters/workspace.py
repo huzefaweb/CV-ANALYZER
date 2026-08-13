@@ -8,6 +8,7 @@ caller, not a reason to write new admission or ownership primitives.
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,10 +16,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from ..domain.identity import Identity
+from ..domain.progress_projection import FAILED, NEEDS_REVIEW, SUCCEEDED, derive_row_state
 from .authorization import authorize_owned_row
 from .db import get_db
 from .identity import require_admitted_identity
-from .models import AnalysisSession
+from .models import AnalysisRevision, AnalysisSession, Candidate, CandidateJob, Document, RevisionMembership
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
 
@@ -94,3 +96,173 @@ def owned_session(
     if row is None or row["creator_issuer"] != identity.issuer:
         raise _NOT_FOUND
     return _project(row)
+
+
+# AR-34's frozen terminal-state vocabulary — a row past finalization is
+# always exactly one of these three (Task 1's derive_row_state raises on
+# anything else finalized).
+_TERMINAL_STATES = frozenset({SUCCEEDED, NEEDS_REVIEW, FAILED})
+
+def _empty_progress() -> dict[str, Any]:
+    # A fresh dict every call — never return shared module-level mutable
+    # state by reference (review finding: a landmine for a future caller
+    # that mutates the returned object in place).
+    return {
+        "revision_number": None,
+        "rows": [],
+        "aggregate": {"total": 0, "by_state": {}},
+        "all_terminal": False,
+        "ranking_suppressed": False,
+        "view_results_available": False,
+    }
+
+
+@router.get("/sessions/{session_id}/progress")
+def session_progress(
+    session_id: str,
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 4.7 (AR-34, NFR-7): every poll independently re-checks admission
+    (`require_admitted_identity`) and creator ownership (`authorize_owned_row`)
+    — there is no per-session cache to grow stale, since FastAPI resolves both
+    dependencies fresh on every request. Per row, only `candidate_id`/
+    `document_reference`/`state` ever leave this function (NFR-12) — no raw
+    `candidate_jobs` status/lease field, no `revision_memberships` internal
+    outcome string, and no score/rank/gate-code content (AR-19's "no
+    provisional/partial ranking ever shown" — Story 5.1's future publication
+    table is the only future reader that may ever expose those, not this
+    projection). `revision_number`/`aggregate`/`all_terminal`/
+    `ranking_suppressed`/`view_results_available` are the projection's own
+    derived summary fields, not raw internal state."""
+    if len(session_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+    table = AnalysisSession.__table__
+    row = authorize_owned_row(
+        db, identity, table, table.c.id, table.c.creator_subject, session_id
+    )
+    if row is None or row["creator_issuer"] != identity.issuer:
+        raise _NOT_FOUND
+
+    # The revision lookup and the candidate/job/membership read below are two
+    # separate statements, not one snapshot — under read-committed isolation
+    # a finalizer commit landing between them could describe a moment where
+    # the "latest revision" choice and its row set are marginally
+    # inconsistent. Accepted for a polling read (the next 2.5s poll
+    # self-corrects); not worth a transaction/lock for this access pattern.
+    revision_table = AnalysisRevision.__table__
+    revision_row = (
+        db.execute(
+            select(revision_table)
+            .where(revision_table.c.analysis_session_id == session_id)
+            .order_by(revision_table.c.revision_number.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if revision_row is None:
+        # Analysis hasn't started yet — a legitimately owned session with
+        # nothing to project, not a 404 (the session itself is valid).
+        return _empty_progress()
+
+    revision_id = revision_row["id"]
+    candidates_table = Candidate.__table__
+    memberships_table = RevisionMembership.__table__
+    jobs_table = CandidateJob.__table__
+    documents_table = Document.__table__
+    # Review finding: candidates.created_at is NOT a real per-Document
+    # timestamp — preparation_finalizer.py assigns one shared `now` to every
+    # Candidate row frozen into a revision in the same transaction, so it
+    # ties for every row and the "frozen order" would silently fall back to
+    # id (a random UUID). documents.created_at is each Document's actual,
+    # distinct upload timestamp — that is the real frozen order to sort by.
+    member_rows = (
+        db.execute(
+            select(
+                candidates_table.c.id,
+                candidates_table.c.document_reference,
+                memberships_table.c.outcome,
+                jobs_table.c.status,
+                jobs_table.c.reclaim_count,
+                jobs_table.c.failure_reason,
+            )
+            .select_from(candidates_table)
+            .join(
+                documents_table,
+                documents_table.c.id == candidates_table.c.document_id,
+            )
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            # LEFT JOIN (review finding): a membership without a matching
+            # candidate_jobs row for this revision is an anomaly under
+            # Story 3.5/4.1's own one-job-per-membership invariant, not an
+            # expected shape — silently INNER-JOIN-dropping it would hide a
+            # Candidate from the Recruiter entirely. Surface it as a logged,
+            # skipped row instead (below), matching every other coordinator
+            # in this codebase's "unreachable but defended" precedent.
+            .join(
+                jobs_table,
+                (jobs_table.c.candidate_id == candidates_table.c.id)
+                & (jobs_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            # Frozen order (AC#1's "processing order carries no rank
+            # implication"): the order Documents were uploaded in, never the
+            # order jobs happen to complete in.
+            .order_by(documents_table.c.created_at, documents_table.c.id)
+        )
+        .mappings()
+        .all()
+    )
+
+    projected_rows: list[dict[str, str]] = []
+    by_state: dict[str, int] = {}
+    for member_row in member_rows:
+        if member_row["status"] is None:
+            # No candidate_jobs row for this membership — unreachable given
+            # Story 3.5/4.1's atomic membership+job creation; log and skip
+            # rather than 500ing visibility into every other Candidate in
+            # this session.
+            print(
+                f"progress projection: candidate {member_row['id']} has no candidate_jobs row "
+                f"for revision {revision_id} — skipping",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            state = derive_row_state(
+                member_row["status"],
+                member_row["reclaim_count"],
+                member_row["failure_reason"],
+                member_row["outcome"],
+            )
+        except ValueError as exc:
+            # Same defense: an internal-invariant violation on one row must
+            # not take down the whole session's Progress visibility (review
+            # finding — this previously propagated as an unhandled 500).
+            print(f"progress projection: candidate {member_row['id']} — {exc}", file=sys.stderr)
+            continue
+        projected_rows.append({"candidate_id": member_row["id"], "document_reference": member_row["document_reference"], "state": state})
+        # Zero-count states are omitted from `by_state` rather than listed
+        # at 0 — a disclosed, arbitrary-but-consistent choice (Task 2 Dev
+        # Notes), not a spec-given shape.
+        by_state[state] = by_state.get(state, 0) + 1
+
+    all_terminal = len(projected_rows) > 0 and all(r["state"] in _TERMINAL_STATES for r in projected_rows)
+    return {
+        "revision_number": revision_row["revision_number"],
+        "rows": projected_rows,
+        "aggregate": {"total": len(projected_rows), "by_state": by_state},
+        "all_terminal": all_terminal,
+        # Story 5.1 (backlog) is the future owner of an actual publication
+        # signal — until it exists, every all-terminal revision is honestly
+        # "ranking suppressed, publication not yet committed" and
+        # `view_results_available` is unconditionally False (disclosed scope
+        # boundary, see this story's Dev Notes).
+        "ranking_suppressed": all_terminal,
+        "view_results_available": False,
+    }

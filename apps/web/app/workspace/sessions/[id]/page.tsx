@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
+import ProgressPanel from "./ProgressPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,7 @@ export default async function WorkspaceSessionPage({ params }: { params: Promise
         <p>Status: {session.status}</p>
         <p>Started: {session.created_at}</p>
       </div>
+      <ProgressPanel sessionId={session.id} />
       <p>
         <a href="/workspace">Return to workspace</a>
       </p>
