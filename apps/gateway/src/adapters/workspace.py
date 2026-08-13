@@ -15,12 +15,27 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
+from ..domain.evidence_summary import summarize_evidence
 from ..domain.identity import Identity
+from ..domain.notice import RESPONSIBLE_HIRING_NOTICE
 from ..domain.progress_projection import FAILED, NEEDS_REVIEW, SUCCEEDED, derive_row_state
+from ..domain.scoring_configuration import Component
 from .authorization import authorize_owned_row
 from .db import get_db
 from .identity import require_admitted_identity
-from .models import AnalysisRevision, AnalysisSession, Candidate, CandidateJob, Document, RevisionMembership
+from .models import (
+    AnalysisRevision,
+    AnalysisSession,
+    Candidate,
+    CandidateIdentity,
+    CandidateJob,
+    CandidateProposal,
+    CandidateResult,
+    Document,
+    JobRequirement,
+    RevisionMembership,
+    Shortlist,
+)
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
 
@@ -263,4 +278,251 @@ def session_progress(
         # select above, so no query change was needed to read it).
         "ranking_suppressed": all_terminal and revision_row["published_at"] is None,
         "view_results_available": revision_row["published_at"] is not None,
+    }
+
+
+def _not_yet_published_results() -> dict[str, Any]:
+    """A legitimately owned session with no published revision yet — a
+    normal in-progress state (mid-processing, or terminal-but-not-yet-
+    published per Story 5.1's publication coordinator), never a 404. A
+    fresh dict every call, same discipline as `_empty_progress()`."""
+    return {
+        "published": False,
+        "revision_number": None,
+        "published_at": None,
+        "counts": {"ranked": 0, "needs_review": 0, "failed": 0},
+        "ranked": [],
+        "needs_review": [],
+        "failed": [],
+        "notice": dict(RESPONSIBLE_HIRING_NOTICE),
+    }
+
+
+def _candidate_display_name(display_name: str | None, document_reference: str) -> str:
+    """UX-DR10: a genuinely parsed name displays when available; otherwise
+    the Document Reference is the safe, always-present fallback — never a
+    blank name."""
+    return display_name if display_name else document_reference
+
+
+@router.get("/sessions/{session_id}/results")
+def session_results(
+    session_id: str,
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 5.2 (AR-8, AR-27-33, AR-46): every read independently re-checks
+    admission and creator ownership, mirroring `session_progress` exactly.
+    Reads only the current published revision (highest `revision_number`
+    with `published_at IS NOT NULL`) — no revision selector/older-revision
+    navigation here (Story 5.4's scope). Only the fields listed below ever
+    leave this function (NFR-12): no raw `candidate_proposals.items_json`
+    (only its `summarize_evidence` derivation), no `candidate_jobs`
+    lease/generation/token fields, no storage paths, no precise-score
+    numerator/denominator pairs (only the already-rounded
+    `headline_whole_percent` — precise-value reconciliation is Candidate
+    Report's future scope, Story 6.1)."""
+    if len(session_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+    table = AnalysisSession.__table__
+    row = authorize_owned_row(
+        db, identity, table, table.c.id, table.c.creator_subject, session_id
+    )
+    if row is None or row["creator_issuer"] != identity.issuer:
+        raise _NOT_FOUND
+
+    revision_table = AnalysisRevision.__table__
+    revision_row = (
+        db.execute(
+            select(revision_table)
+            .where(revision_table.c.analysis_session_id == session_id)
+            .where(revision_table.c.published_at.is_not(None))
+            .order_by(revision_table.c.revision_number.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if revision_row is None:
+        return _not_yet_published_results()
+
+    revision_id = revision_row["id"]
+    candidates_table = Candidate.__table__
+    memberships_table = RevisionMembership.__table__
+    documents_table = Document.__table__
+    identities_table = CandidateIdentity.__table__
+    results_table = CandidateResult.__table__
+    shortlists_table = Shortlist.__table__
+
+    member_rows = (
+        db.execute(
+            select(
+                candidates_table.c.id,
+                candidates_table.c.document_reference,
+                documents_table.c.original_filename,
+                memberships_table.c.outcome,
+                memberships_table.c.rank_position,
+                memberships_table.c.tie_group,
+                memberships_table.c.presentation_ordinal,
+                identities_table.c.display_name,
+                results_table.c.id.label("result_id"),
+                results_table.c.candidate_job_id,
+                results_table.c.headline_whole_percent,
+                results_table.c.gate_codes,
+                results_table.c.failure_category,
+                shortlists_table.c.state.label("shortlist_state"),
+            )
+            .select_from(candidates_table)
+            .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .join(identities_table, identities_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .join(shortlists_table, shortlists_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .order_by(documents_table.c.created_at, documents_table.c.id)
+        )
+        .mappings()
+        .all()
+    )
+
+    # Loaded once per request, shared by every Ranked row's evidence
+    # summarization below — a session's Job Requirements are frozen at
+    # Revision 1 (AR-9/AR-10), so one read serves the whole projection.
+    requirements_table = JobRequirement.__table__
+    requirement_rows = (
+        db.execute(
+            select(requirements_table.c.id, requirements_table.c.canonical_text, requirements_table.c.component).where(
+                requirements_table.c.analysis_session_id == session_id
+            )
+        )
+        .mappings()
+        .all()
+    )
+    requirement_texts: dict[str, str] = {}
+    requirement_components: dict[str, Component] = {}
+    for r in requirement_rows:
+        try:
+            requirement_components[r["id"]] = Component(r["component"])
+        except ValueError:
+            # Defended, not expected: a Job Requirement with a component
+            # value outside the frozen AD-10 vocabulary would otherwise
+            # crash requirement lookup for every Candidate in the session.
+            print(f"results projection: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection", file=sys.stderr)
+            continue
+        requirement_texts[r["id"]] = r["canonical_text"]
+
+    proposals_table = CandidateProposal.__table__
+
+    # ponytail: one query per ranked Candidate (N+1) rather than a single
+    # batched IN (...) read — simplest correct shape at V1's ≤20-Candidate
+    # demo scale. Upgrade to a single batched query keyed by candidate_job_id
+    # if a cohort size measurably makes this a bottleneck.
+    def _proposal_items(candidate_job_id: str | None) -> list[dict]:
+        if candidate_job_id is None:
+            return []
+        proposal_row = (
+            db.execute(select(proposals_table.c.items_json).where(proposals_table.c.candidate_job_id == candidate_job_id))
+            .mappings()
+            .one_or_none()
+        )
+        return proposal_row["items_json"] if proposal_row is not None else []
+
+    ranked: list[dict[str, Any]] = []
+    needs_review: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for member_row in member_rows:
+        # Every row is independently defended, the same "skip and log" way
+        # session_progress already established: a single anomalous row
+        # (missing candidate_results, a Job Requirement referenced by a
+        # proposal item but absent from this session, an out-of-vocabulary
+        # Component value) must not take down Results visibility for every
+        # other Candidate in the session.
+        try:
+            display_name = _candidate_display_name(member_row["display_name"], member_row["document_reference"])
+            shortlist_state = member_row["shortlist_state"] or "NotShortlisted"
+            outcome = member_row["outcome"]
+
+            if outcome in ("NewResult", "ReusedResult"):
+                if member_row["result_id"] is None:
+                    raise ValueError("ranked membership has no matching candidate_results row")
+                items = _proposal_items(member_row["candidate_job_id"])
+                summary = summarize_evidence(items, requirement_texts, requirement_components)
+                ranked.append(
+                    {
+                        "candidate_id": member_row["id"],
+                        "document_reference": member_row["document_reference"],
+                        "original_filename": member_row["original_filename"],
+                        "display_name": display_name,
+                        "rank_position": member_row["rank_position"],
+                        "tie_group": member_row["tie_group"],
+                        "presentation_ordinal": member_row["presentation_ordinal"],
+                        "headline_whole_percent": member_row["headline_whole_percent"],
+                        "strengths": [
+                            {"requirement_text": p.requirement_text, "state": p.state} for p in summary.strengths
+                        ],
+                        "gaps": [{"requirement_text": p.requirement_text, "state": p.state} for p in summary.gaps],
+                        "shortlist_state": shortlist_state,
+                    }
+                )
+            elif outcome == "NeedsReview":
+                needs_review.append(
+                    {
+                        "candidate_id": member_row["id"],
+                        "document_reference": member_row["document_reference"],
+                        "original_filename": member_row["original_filename"],
+                        "display_name": display_name,
+                        "gate_codes": member_row["gate_codes"] or [],
+                        "shortlist_state": shortlist_state,
+                    }
+                )
+            elif outcome == "Failed":
+                failed.append(
+                    {
+                        "candidate_id": member_row["id"],
+                        "document_reference": member_row["document_reference"],
+                        "original_filename": member_row["original_filename"],
+                        "display_name": display_name,
+                        "failure_category": member_row["failure_category"],
+                        "shortlist_state": shortlist_state,
+                    }
+                )
+            else:
+                # Unreachable for a published revision — Story 5.1's
+                # publication coordinator only commits after exact terminal
+                # membership.
+                raise ValueError(f"non-terminal outcome {outcome!r} in a published revision")
+        except (KeyError, ValueError) as exc:
+            print(
+                f"results projection: candidate {member_row['id']} in revision {revision_id} — {exc} — skipping",
+                file=sys.stderr,
+            )
+            continue
+
+    # `None`-safe: `presentation_ordinal` is guaranteed non-null for every
+    # ranked row Story 5.1's coordinator commits, but the column itself is
+    # nullable (AR-13) — sort defensively rather than trust that invariant
+    # inside a projection two stories removed from where it's enforced.
+    ranked.sort(key=lambda r: (r["presentation_ordinal"] is None, r["presentation_ordinal"]))
+
+    return {
+        "published": True,
+        "revision_number": revision_row["revision_number"],
+        "published_at": revision_row["published_at"].isoformat(),
+        "counts": {
+            "ranked": revision_row["ranked_count"],
+            "needs_review": revision_row["needs_review_count"],
+            "failed": revision_row["failed_count"],
+        },
+        "ranked": ranked,
+        "needs_review": needs_review,
+        "failed": failed,
+        "notice": dict(RESPONSIBLE_HIRING_NOTICE),
     }
