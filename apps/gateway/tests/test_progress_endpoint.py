@@ -82,7 +82,7 @@ def _seed_session(db, issuer: str, subject: str) -> str:
     return session_id
 
 
-def _seed_revision(db, session_id: str, revision_number: int = 1) -> str:
+def _seed_revision(db, session_id: str, revision_number: int = 1, published_at: datetime | None = None) -> str:
     revision_id = str(uuid.uuid4())
     db.add(
         AnalysisRevision(
@@ -91,6 +91,7 @@ def _seed_revision(db, session_id: str, revision_number: int = 1) -> str:
             revision_number=revision_number,
             status="frozen",
             created_at=datetime.now(timezone.utc),
+            published_at=published_at,
         )
     )
     db.commit()
@@ -295,6 +296,27 @@ def test_all_terminal_suppresses_ranking_and_never_offers_view_results(db):
     assert body["all_terminal"] is True
     assert body["ranking_suppressed"] is True
     assert body["view_results_available"] is False
+
+
+def test_published_revision_makes_view_results_available_and_stops_suppressing_ranking(db):
+    """Story 5.1: ranking_suppressed/view_results_available now track the
+    real analysis_revisions.published_at column instead of a hard-coded
+    constant — this is the positive case (Story 4.7 only ever exercised the
+    unpublished/always-suppressed case)."""
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    revision_id = _seed_revision(db, session_id, published_at=datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    _seed_candidate_row(db, revision_id=revision_id, session_id=session_id, document_reference="D1", created_at=now, job_status="finalized", outcome="NewResult")
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/sessions/{session_id}/progress")
+    client.cookies.clear()
+
+    body = response.json()
+    assert body["all_terminal"] is True
+    assert body["ranking_suppressed"] is False
+    assert body["view_results_available"] is True
 
 
 def test_no_revision_yet_is_empty_projection_not_404(db):

@@ -15,6 +15,7 @@ from .document_upload import router as document_upload_router
 from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
 from .preparation_finalizer import scan_and_finalize
+from .publication_coordinator import scan_and_publish
 from .recovery_sweep import sweep_stale
 from .workspace import router as workspace_router
 
@@ -102,17 +103,44 @@ async def _run_candidate_finalizer_loop() -> None:
         await asyncio.sleep(_CANDIDATE_FINALIZER_SCAN_INTERVAL_SECONDS)
 
 
+# AR-18/AR-20: publication coordinator runs on the same stateless,
+# level-triggered pattern as the three loops above — immediate startup scan,
+# then a 2-second cadence (AR-15's general ≤2-second coordinator bound).
+_PUBLICATION_SCAN_INTERVAL_SECONDS = 2
+
+
+async def _run_publication_loop() -> None:
+    while True:
+        try:
+            db = _SessionLocal()
+            try:
+                await asyncio.to_thread(scan_and_publish, db)
+            finally:
+                # A close()-time failure must not shadow a real scan
+                # exception from the except clause below (same discipline
+                # as the other three loops' review-fixed close() handling).
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
+            print(f"publication scan failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(_PUBLICATION_SCAN_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     finalizer_task = asyncio.create_task(_run_finalizer_loop())
     sweep_task = asyncio.create_task(_run_recovery_sweep_loop())
     candidate_finalizer_task = asyncio.create_task(_run_candidate_finalizer_loop())
+    publication_task = asyncio.create_task(_run_publication_loop())
     try:
         yield
     finally:
         finalizer_task.cancel()
         sweep_task.cancel()
         candidate_finalizer_task.cancel()
+        publication_task.cancel()
 
 
 app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)

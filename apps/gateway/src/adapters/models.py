@@ -177,6 +177,15 @@ class AnalysisRevision(Base):
     # Story 4.6 (AR-19): bumped once per Candidate finalization commit on this
     # revision; Story 5.1's publication coordinator is the future reader.
     requested_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Story 5.1 (AD-7, AR-20): the last requested_version successfully
+    # published; published_at IS NOT NULL is the sole "has this revision ever
+    # published" signal (AnalysisRevision.status is not repurposed for this —
+    # it is set once to "frozen" by Story 3.5 and read nowhere else).
+    published_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ranked_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    needs_review_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class RevisionMembership(Base):
@@ -191,6 +200,12 @@ class RevisionMembership(Base):
     candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Story 5.1 (AD-10, AR-30): populated only for ranked (NewResult/
+    # ReusedResult) members of a published revision; NULL for NeedsReview/
+    # Failed/unpublished ("unranked outcomes have null rank" — AR-13).
+    rank_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tie_group: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    presentation_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class CandidateJob(Base):

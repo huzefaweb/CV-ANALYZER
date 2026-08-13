@@ -130,9 +130,9 @@ def session_progress(
     `document_reference`/`state` ever leave this function (NFR-12) — no raw
     `candidate_jobs` status/lease field, no `revision_memberships` internal
     outcome string, and no score/rank/gate-code content (AR-19's "no
-    provisional/partial ranking ever shown" — Story 5.1's future publication
-    table is the only future reader that may ever expose those, not this
-    projection). `revision_number`/`aggregate`/`all_terminal`/
+    provisional/partial ranking ever shown" — Story 5.1's `published_at`
+    column is the only signal this projection ever reads; rank/score content
+    stays Story 5.2's Results projection to build). `revision_number`/`aggregate`/`all_terminal`/
     `ranking_suppressed`/`view_results_available` are the projection's own
     derived summary fields, not raw internal state."""
     if len(session_id) > _MAX_ID_LENGTH:
@@ -258,11 +258,9 @@ def session_progress(
         "rows": projected_rows,
         "aggregate": {"total": len(projected_rows), "by_state": by_state},
         "all_terminal": all_terminal,
-        # Story 5.1 (backlog) is the future owner of an actual publication
-        # signal — until it exists, every all-terminal revision is honestly
-        # "ranking suppressed, publication not yet committed" and
-        # `view_results_available` is unconditionally False (disclosed scope
-        # boundary, see this story's Dev Notes).
-        "ranking_suppressed": all_terminal,
-        "view_results_available": False,
+        # Story 5.1: published_at IS NOT NULL is the real "has this revision
+        # ever published" signal (revision_table is already a whole-row
+        # select above, so no query change was needed to read it).
+        "ranking_suppressed": all_terminal and revision_row["published_at"] is None,
+        "view_results_available": revision_row["published_at"] is not None,
     }
