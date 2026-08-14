@@ -7,10 +7,11 @@ import {
   gapText,
   identityReferenceSuffix,
   parseRevisionParam,
-  shortlistLabel,
+  SHORTLIST_RETENTION_NOTE,
 } from "@/lib/resultsFormatting";
 import RevisionSelector, { type RevisionOption } from "./RevisionSelector";
 import RetryButton from "./RetryButton";
+import ShortlistToggle from "@/app/ShortlistToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,7 @@ type RankedRow = {
   strengths: EvidencePoint[];
   gaps: EvidencePoint[];
   shortlist_state: string;
+  shortlist_version: number;
 };
 
 type NeedsReviewRow = {
@@ -35,6 +37,7 @@ type NeedsReviewRow = {
   display_name: string;
   gate_codes: string[];
   shortlist_state: string;
+  shortlist_version: number;
 };
 
 type FailedRow = {
@@ -44,6 +47,7 @@ type FailedRow = {
   display_name: string;
   failure_category: string;
   shortlist_state: string;
+  shortlist_version: number;
 };
 
 type Notice = { version: number; text: string };
@@ -212,7 +216,12 @@ export default async function ResultsPage({
                     </ul>
                   </div>
                 ) : null}
-                <p>{shortlistLabel(row.shortlist_state)}</p>
+                <ShortlistToggle
+                  candidateId={row.candidate_id}
+                  revisionNumber={data.revision_number}
+                  initialState={row.shortlist_state}
+                  initialVersion={row.shortlist_version}
+                />
                 <p>
                   <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
                     View Candidate Report
@@ -247,7 +256,13 @@ export default async function ResultsPage({
                     <li key={code}>{gateCodeMessage(code)}</li>
                   ))}
                 </ul>
-                <p>{shortlistLabel(row.shortlist_state)}</p>
+                <ShortlistToggle
+                  candidateId={row.candidate_id}
+                  revisionNumber={data.revision_number}
+                  initialState={row.shortlist_state}
+                  initialVersion={row.shortlist_version}
+                />
+                <p>{SHORTLIST_RETENTION_NOTE}</p>
                 <p>
                   <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
                     View Candidate Report
@@ -278,7 +293,13 @@ export default async function ResultsPage({
                   {row.original_filename}
                 </p>
                 <p>{row.failure_category}</p>
-                <p>{shortlistLabel(row.shortlist_state)}</p>
+                <ShortlistToggle
+                  candidateId={row.candidate_id}
+                  revisionNumber={data.revision_number}
+                  initialState={row.shortlist_state}
+                  initialVersion={row.shortlist_version}
+                />
+                <p>{SHORTLIST_RETENTION_NOTE}</p>
                 {data.is_current ? (
                   <RetryButton sessionId={id} candidateId={row.candidate_id} currentRevisionNumber={data.revision_number} />
                 ) : null}

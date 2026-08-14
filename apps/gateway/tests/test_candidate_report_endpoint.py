@@ -291,6 +291,7 @@ def test_ranked_report_includes_score_findings_interview_focus_and_shortlist(db)
     assert body["headline_whole_percent"] == 86
     assert body["precise_score_percent"] == "85.63"
     assert body["shortlist_state"] == "Shortlisted"
+    assert body["shortlist_version"] == 1
     assert body["strengths"] == [{"requirement_text": "Kubernetes operations", "state": "Matched"}]
     assert body["gaps"] == [{"requirement_text": "Kafka production operations", "state": "Not Found"}]
     assert body["interview_focus"] == body["gaps"]
@@ -321,6 +322,8 @@ def test_needs_review_report_suppresses_score_and_exposes_gate_codes(db):
     body = response.json()
     assert body["outcome"] == "NeedsReview"
     assert body["gate_codes"] == ["TEXT_BELOW_500"]
+    assert body["shortlist_state"] == "NotShortlisted"
+    assert body["shortlist_version"] == 1
     assert "headline_whole_percent" not in body
     assert "precise_score_percent" not in body
 

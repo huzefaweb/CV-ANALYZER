@@ -8,6 +8,15 @@ export function shortlistLabel(state: string): string {
   return state === "Shortlisted" ? "Shortlisted" : "Not shortlisted";
 }
 
+// Story 6.4 (AC#3): Shortlist is Candidate-owned, not revision-owned — a
+// retry that moves a previously ranked Candidate to Needs Review or Failed
+// never clears an existing Shortlist mark. Shown next to the toggle
+// wherever a Candidate isn't Ranked, so the Recruiter understands why a
+// Shortlist mark on a Needs Review/Failed Candidate is still present and
+// that it carries no scoring/rank/lifecycle meaning.
+export const SHORTLIST_RETENTION_NOTE =
+  "Shortlist reflects your own decision and is unaffected by outcome or scoring — it is retained even when a retry changes this Candidate's outcome.";
+
 export function gapText(point: EvidencePoint): string {
   return point.state === "Needs Validation"
     ? `Needs Validation: ${point.requirement_text}`

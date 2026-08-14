@@ -8,9 +8,10 @@ import {
   gapText,
   identityReferenceSuffix,
   parseRevisionParam,
-  shortlistLabel,
+  SHORTLIST_RETENTION_NOTE,
 } from "@/lib/resultsFormatting";
 import EvidenceSection, { type EvidenceRow } from "./EvidenceSection";
+import ShortlistToggle from "@/app/ShortlistToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,7 @@ type RankedReport = {
   published_at: string;
   is_current: boolean;
   shortlist_state: string;
+  shortlist_version: number;
   strengths: EvidencePoint[];
   gaps: EvidencePoint[];
   interview_focus: EvidencePoint[];
@@ -270,7 +272,13 @@ export default async function CandidateReportPage({
         </section>
       ) : null}
 
-      <p>{shortlistLabel(data.shortlist_state)}</p>
+      <ShortlistToggle
+        candidateId={data.candidate_id}
+        revisionNumber={data.revision_number}
+        initialState={data.shortlist_state}
+        initialVersion={data.shortlist_version}
+      />
+      {data.outcome === "NeedsReview" ? <p>{SHORTLIST_RETENTION_NOTE}</p> : null}
 
       <p>
         <a href={`/workspace/sessions/${data.analysis_session_id}/results?revision=${data.revision_number}`}>

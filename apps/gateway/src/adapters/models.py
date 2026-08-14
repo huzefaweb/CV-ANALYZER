@@ -352,9 +352,14 @@ class CandidateResult(Base):
 
 class Shortlist(Base):
     """Story 4.6/AR-33: one Candidate-owned Shortlist state, stable across
-    revisions (never per-membership). This story only ever default-inserts
-    at `state="NotShortlisted"`, `version=1` on first finalization of a
-    Candidate — Story 6.x owns the versioned PUT/DELETE mutation."""
+    revisions (never per-membership). Story 4.6 default-inserts at
+    `state="NotShortlisted"`, `version=1` on first finalization of a
+    Candidate; Story 6.4 owns the versioned mutation
+    (`PUT /workspace/candidates/{candidate_id}/shortlist`) that changes it
+    thereafter. `last_command_idempotency_key` mirrors `Document.last_
+    command_idempotency_key`'s exact replay-marker semantics (nullable —
+    the row exists before any command has ever been issued against it,
+    unlike `EvidenceReview`'s not-null column)."""
 
     __tablename__ = "shortlists"
 
@@ -362,6 +367,7 @@ class Shortlist(Base):
     candidate_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="NotShortlisted")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_command_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

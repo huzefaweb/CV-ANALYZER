@@ -337,6 +337,7 @@ def test_mixed_outcome_revision_separates_families_and_counts(db):
     assert ranked_row["display_name"] == "Jordan Lee"
     assert ranked_row["headline_whole_percent"] == 86
     assert ranked_row["shortlist_state"] == "Shortlisted"
+    assert ranked_row["shortlist_version"] == 1
     assert ranked_row["strengths"] == [{"requirement_text": "Kubernetes operations", "state": "Matched"}]
     assert ranked_row["gaps"] == []
 
@@ -344,10 +345,12 @@ def test_mixed_outcome_revision_separates_families_and_counts(db):
     assert body["needs_review"][0]["candidate_id"] == needs_review_id
     assert body["needs_review"][0]["gate_codes"] == ["TEXT_BELOW_500"]
     assert body["needs_review"][0]["shortlist_state"] == "NotShortlisted"
+    assert body["needs_review"][0]["shortlist_version"] == 1
 
     assert len(body["failed"]) == 1
     assert body["failed"][0]["candidate_id"] == failed_id
     assert body["failed"][0]["failure_category"] == "Analysis timed out"
+    assert body["failed"][0]["shortlist_version"] == 1
 
 
 def test_tied_ranked_rows_share_rank_position(db):

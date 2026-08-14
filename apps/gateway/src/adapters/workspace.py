@@ -12,7 +12,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -489,6 +489,7 @@ def session_results(
                 results_table.c.gate_codes,
                 results_table.c.failure_category,
                 shortlists_table.c.state.label("shortlist_state"),
+                shortlists_table.c.version.label("shortlist_version"),
             )
             .select_from(candidates_table)
             .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
@@ -566,6 +567,7 @@ def session_results(
         try:
             display_name = _candidate_display_name(member_row["display_name"], member_row["document_reference"])
             shortlist_state = member_row["shortlist_state"] or "NotShortlisted"
+            shortlist_version = member_row["shortlist_version"] or 1
             outcome = member_row["outcome"]
 
             if outcome in ("NewResult", "ReusedResult"):
@@ -588,6 +590,7 @@ def session_results(
                         ],
                         "gaps": [{"requirement_text": p.requirement_text, "state": p.state} for p in summary.gaps],
                         "shortlist_state": shortlist_state,
+                        "shortlist_version": shortlist_version,
                     }
                 )
             elif outcome == "NeedsReview":
@@ -599,6 +602,7 @@ def session_results(
                         "display_name": display_name,
                         "gate_codes": member_row["gate_codes"] or [],
                         "shortlist_state": shortlist_state,
+                        "shortlist_version": shortlist_version,
                     }
                 )
             elif outcome == "Failed":
@@ -610,6 +614,7 @@ def session_results(
                         "display_name": display_name,
                         "failure_category": member_row["failure_category"],
                         "shortlist_state": shortlist_state,
+                        "shortlist_version": shortlist_version,
                     }
                 )
             else:
@@ -746,6 +751,7 @@ def candidate_report(
                 results_table.c.precise_score_percent,
                 results_table.c.gate_codes,
                 shortlists_table.c.state.label("shortlist_state"),
+                shortlists_table.c.version.label("shortlist_version"),
             )
             .select_from(candidates_table)
             .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
@@ -775,6 +781,7 @@ def candidate_report(
     try:
         display_name = _candidate_display_name(member_row["display_name"], member_row["document_reference"])
         shortlist_state = member_row["shortlist_state"] or "NotShortlisted"
+        shortlist_version = member_row["shortlist_version"] or 1
         outcome = member_row["outcome"]
 
         requirements_table = JobRequirement.__table__
@@ -833,6 +840,7 @@ def candidate_report(
             "published_at": revision_row["published_at"].isoformat(),
             "is_current": is_current,
             "shortlist_state": shortlist_state,
+            "shortlist_version": shortlist_version,
             "strengths": strengths,
             "gaps": gaps,
             "interview_focus": gaps,
@@ -1408,4 +1416,91 @@ def evidence_review(
             f"evidence_review: candidate {candidate_id} requirement {job_requirement_id} in revision {revision_id} — {exc}",
             file=sys.stderr,
         )
+        raise _NOT_FOUND
+
+
+class ShortlistRequest(BaseModel):
+    state: Literal["Shortlisted", "NotShortlisted"]
+    expected_version: int = Field(ge=1, le=2147483647)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.put("/candidates/{candidate_id}/shortlist")
+def candidate_shortlist(
+    candidate_id: str,
+    body: ShortlistRequest,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.4 (AC#1-2; AR-7-8, AR-34): toggle the Candidate-owned
+    Shortlist state. `_authorize_candidate_revision` reuse gives the same
+    two-hop ownership check (AR-8) every other Candidate mutation in this
+    module uses; `revision_number` is authorization plumbing only — unlike
+    `evidence_review`, `shortlists` carries no revision column and is
+    never scoped or filtered by it (Shortlist is Candidate-owned, not
+    revision-owned). No outcome-qualification gate either (unlike
+    `evidence_review`'s NewResult/ReusedResult/NeedsReview check): AC#3
+    requires Shortlist to remain settable/readable even after a retry
+    moves a Candidate to Failed, so this endpoint must stay reachable
+    regardless of outcome. CAS/idempotency shape mirrors `evidence_review`
+    exactly, including its reused-key-with-a-different-value guard —
+    `state` varies per request the same way `disputed` does, so a matching
+    idempotency_key alone can never imply the same command."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    shortlists_table = Shortlist.__table__
+
+    try:
+        existing = (
+            db.execute(select(shortlists_table).where(shortlists_table.c.candidate_id == candidate_id))
+            .mappings()
+            .one_or_none()
+        )
+        # Defended, not expected: every Candidate that can reach a
+        # published revision (a precondition of _authorize_candidate_
+        # revision succeeding above) has already been finalized at least
+        # once, and candidate_finalizer.py default-inserts a shortlists
+        # row on every outcome branch before that happens.
+        if existing is None:
+            raise _NOT_FOUND
+
+        if existing["last_command_idempotency_key"] == body.idempotency_key:
+            if existing["state"] == body.state:
+                return {"state": existing["state"], "version": existing["version"]}
+            raise HTTPException(
+                status_code=409,
+                detail={"state": existing["state"], "version": existing["version"]},
+            )
+
+        result = db.execute(
+            shortlists_table.update()
+            .where(shortlists_table.c.id == existing["id"])
+            .where(shortlists_table.c.version == body.expected_version)
+            .values(
+                state=body.state,
+                version=shortlists_table.c.version + 1,
+                last_command_idempotency_key=body.idempotency_key,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        if result.rowcount == 0:
+            db.rollback()
+            current = (
+                db.execute(select(shortlists_table).where(shortlists_table.c.id == existing["id"])).mappings().one()
+            )
+            if current["last_command_idempotency_key"] == body.idempotency_key and current["state"] == body.state:
+                return {"state": current["state"], "version": current["version"]}
+            raise HTTPException(
+                status_code=409,
+                detail={"state": current["state"], "version": current["version"]},
+            )
+
+        db.commit()
+        updated = db.execute(select(shortlists_table).where(shortlists_table.c.id == existing["id"])).mappings().one()
+        return {"state": updated["state"], "version": updated["version"]}
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        db.rollback()
+        print(f"candidate_shortlist: candidate {candidate_id} — {exc}", file=sys.stderr)
         raise _NOT_FOUND
