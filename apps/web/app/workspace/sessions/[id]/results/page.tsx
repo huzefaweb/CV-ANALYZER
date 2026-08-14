@@ -2,6 +2,8 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import { gateCodeMessage } from "@/lib/gateCodeMessages";
+import RevisionSelector, { type RevisionOption } from "./RevisionSelector";
+import RetryButton from "./RetryButton";
 
 export const dynamic = "force-dynamic";
 
@@ -42,11 +44,22 @@ type FailedRow = {
 type Notice = { version: number; text: string };
 
 type ResultsProjection =
-  | { published: false; revision_number: null; published_at: null; counts: { ranked: 0; needs_review: 0; failed: 0 }; ranked: []; needs_review: []; failed: []; notice: Notice }
+  | {
+      published: false;
+      revision_number: null;
+      published_at: null;
+      is_current: false;
+      counts: { ranked: 0; needs_review: 0; failed: 0 };
+      ranked: [];
+      needs_review: [];
+      failed: [];
+      notice: Notice;
+    }
   | {
       published: true;
       revision_number: number;
       published_at: string;
+      is_current: boolean;
       counts: { ranked: number; needs_review: number; failed: number };
       ranked: RankedRow[];
       needs_review: NeedsReviewRow[];
@@ -79,15 +92,51 @@ function AuthorizationDenied() {
   );
 }
 
-export default async function ResultsPage({ params }: { params: Promise<{ id: string }> }) {
+// Defensive parse (Story 5.4): a malformed `?revision=` never reaches the
+// gateway query string — treated as absent, falling back to the current
+// published revision, rather than forwarding garbage for the gateway to
+// reject.
+function parseRevisionParam(raw: string | string[] | undefined): number | undefined {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  // Review finding: Number.parseInt is lenient about trailing garbage
+  // ("1abc" -> 1, "1.9" -> 1) — require the whole string to be digits
+  // before parsing, so malformed input is genuinely treated as absent.
+  if (value === undefined || !/^[0-9]+$/.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return parsed > 0 ? parsed : undefined;
+}
+
+export default async function ResultsPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ revision?: string | string[] }>;
+}) {
   const { id } = await params;
+  const { revision } = await searchParams;
+  const revisionNumber = parseRevisionParam(revision);
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) redirect("/login");
 
-  const response = await gatewayFetch(`/workspace/sessions/${encodeURIComponent(id)}/results`, {
-    headers: { Cookie: `${SESSION_COOKIE}=${token}` },
-  });
+  const resultsPath = revisionNumber
+    ? `/workspace/sessions/${encodeURIComponent(id)}/results?revision_number=${revisionNumber}`
+    : `/workspace/sessions/${encodeURIComponent(id)}/results`;
+
+  // Review finding: the revisions fetch is secondary (only feeds the
+  // selector) and must not take down the whole page if it network-fails —
+  // Promise.allSettled isolates it from the required `/results` fetch,
+  // which still propagates its own failure as before.
+  const [resultsOutcome, revisionsOutcome] = await Promise.allSettled([
+    gatewayFetch(resultsPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } }),
+    gatewayFetch(`/workspace/sessions/${encodeURIComponent(id)}/revisions`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+    }),
+  ]);
+
+  if (resultsOutcome.status === "rejected") throw resultsOutcome.reason;
+  const response = resultsOutcome.value;
 
   if (response.status === 401) {
     redirect(`/session-expired?return_to=${encodeURIComponent(`/workspace/sessions/${id}/results`)}`);
@@ -97,11 +146,18 @@ export default async function ResultsPage({ params }: { params: Promise<{ id: st
   if (!response.ok) throw new Error(`Results request failed: ${response.status}`);
 
   const data: ResultsProjection = await response.json();
+  const revisions: RevisionOption[] =
+    revisionsOutcome.status === "fulfilled" && revisionsOutcome.value.ok
+      ? (await revisionsOutcome.value.json()).revisions
+      : [];
 
   if (!data.published) {
     return (
       <main id="main">
         <h1>Results</h1>
+        {revisions.length > 0 ? (
+          <RevisionSelector sessionId={id} revisions={revisions} activeRevisionNumber={null} />
+        ) : null}
         <div className="notice">
           <p>Results are not yet published for this Analysis.</p>
         </div>
@@ -117,6 +173,14 @@ export default async function ResultsPage({ params }: { params: Promise<{ id: st
   return (
     <main id="main">
       <h1>Results</h1>
+      {revisions.length > 0 ? (
+        <RevisionSelector sessionId={id} revisions={revisions} activeRevisionNumber={data.revision_number} />
+      ) : null}
+      {!data.is_current ? (
+        <p>
+          <a href={`/workspace/sessions/${id}/results`}>Return to current published revision</a>
+        </p>
+      ) : null}
       <p>
         Revision {data.revision_number} · Published {publishedDate}
       </p>
@@ -221,6 +285,9 @@ export default async function ResultsPage({ params }: { params: Promise<{ id: st
                 </p>
                 <p>{row.failure_category}</p>
                 <p>{shortlistLabel(row.shortlist_state)}</p>
+                {data.is_current ? (
+                  <RetryButton sessionId={id} candidateId={row.candidate_id} currentRevisionNumber={data.revision_number} />
+                ) : null}
               </li>
             ))}
           </ul>

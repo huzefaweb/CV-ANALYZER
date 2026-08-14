@@ -439,6 +439,92 @@ def test_ranked_membership_with_no_matching_result_row_is_skipped_without_500ing
     assert [row["candidate_id"] for row in body["ranked"]] == [healthy_id]
 
 
+def test_unparameterized_call_now_also_reports_is_current_true(db):
+    """Story 5.4 regression guard: the existing unparameterized call must
+    behave byte-for-byte as before, plus the new `is_current` field."""
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    _seed_revision(db, session_id, revision_number=1, published_at=datetime.now(timezone.utc))
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/sessions/{session_id}/results")
+    client.cookies.clear()
+
+    body = response.json()
+    assert body["published"] is True
+    assert body["is_current"] is True
+
+
+def test_revision_number_targets_an_older_published_revision(db):
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    older_revision_id = _seed_revision(db, session_id, revision_number=1, published_at=datetime.now(timezone.utc))
+    _seed_candidate(
+        db, revision_id=older_revision_id, session_id=session_id, document_reference="D1", outcome="NewResult",
+        rank_position=1, tie_group=1, presentation_ordinal=1, headline_whole_percent=55,
+    )
+    current_revision_id = _seed_revision(db, session_id, revision_number=2, published_at=datetime.now(timezone.utc))
+    _seed_candidate(
+        db, revision_id=current_revision_id, session_id=session_id, document_reference="D2", outcome="NewResult",
+        rank_position=1, tie_group=1, presentation_ordinal=1, headline_whole_percent=55,
+    )
+
+    client.cookies.set("session", token)
+    older_response = client.get(f"/workspace/sessions/{session_id}/results", params={"revision_number": 1})
+    current_response = client.get(f"/workspace/sessions/{session_id}/results", params={"revision_number": 2})
+    default_response = client.get(f"/workspace/sessions/{session_id}/results")
+    client.cookies.clear()
+
+    older_body = older_response.json()
+    assert older_body["published"] is True
+    assert older_body["revision_number"] == 1
+    assert older_body["is_current"] is False
+
+    current_body = current_response.json()
+    assert current_body["published"] is True
+    assert current_body["revision_number"] == 2
+    assert current_body["is_current"] is True
+
+    # The default (unparameterized) call always matches the explicit current one.
+    assert default_response.json() == current_body
+
+
+def test_revision_number_for_nonexistent_and_unpublished_revisions_return_the_same_body(db):
+    """No enumeration channel: a missing revision number and one that
+    exists but isn't published yet must return the identical neutral body
+    — a caller cannot distinguish "doesn't exist" from "not published yet"."""
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    _seed_revision(db, session_id, revision_number=1, published_at=None)  # still processing
+
+    client.cookies.set("session", token)
+    unpublished_response = client.get(f"/workspace/sessions/{session_id}/results", params={"revision_number": 1})
+    nonexistent_response = client.get(f"/workspace/sessions/{session_id}/results", params={"revision_number": 999})
+    client.cookies.clear()
+
+    assert unpublished_response.json() == nonexistent_response.json()
+    assert unpublished_response.json()["published"] is False
+    assert unpublished_response.json()["is_current"] is False
+
+
+def test_revision_number_cannot_read_another_sessions_revision(db):
+    """A `revision_number` that only exists under a different session must
+    not leak that session's content through this caller's own session_id
+    path — the lookup is scoped by both session_id and revision_number."""
+    owner_identity, owner_token = _admitted_identity_and_token(db)
+    owner_session_id = _seed_session(db, owner_identity.issuer, owner_identity.subject)
+
+    other_identity, _ = _admitted_identity_and_token(db)
+    other_session_id = _seed_session(db, other_identity.issuer, other_identity.subject)
+    _seed_revision(db, other_session_id, revision_number=1, published_at=datetime.now(timezone.utc))
+
+    client.cookies.set("session", owner_token)
+    response = client.get(f"/workspace/sessions/{owner_session_id}/results", params={"revision_number": 1})
+    client.cookies.clear()
+
+    assert response.json()["published"] is False
+
+
 def test_cross_owner_session_is_the_same_neutral_404(db):
     owner_identity, _ = _admitted_identity_and_token(db)
     _, other_token = _admitted_identity_and_token(db)

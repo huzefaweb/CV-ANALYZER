@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Mapping
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
@@ -285,16 +285,71 @@ def _not_yet_published_results() -> dict[str, Any]:
     """A legitimately owned session with no published revision yet — a
     normal in-progress state (mid-processing, or terminal-but-not-yet-
     published per Story 5.1's publication coordinator), never a 404. A
-    fresh dict every call, same discipline as `_empty_progress()`."""
+    fresh dict every call, same discipline as `_empty_progress()`. Story 5.4
+    also returns this exact shape for a `revision_number` query that
+    resolves to nothing (missing, cross-session, or exists but unpublished)
+    — collapsing those cases avoids letting a caller enumerate which one
+    applies (Story 5.3's "neutral... without disclosing ownership"
+    principle, extended to this projection's optional filter)."""
     return {
         "published": False,
         "revision_number": None,
         "published_at": None,
+        "is_current": False,
         "counts": {"ranked": 0, "needs_review": 0, "failed": 0},
         "ranked": [],
         "needs_review": [],
         "failed": [],
         "notice": dict(RESPONSIBLE_HIRING_NOTICE),
+    }
+
+
+@router.get("/sessions/{session_id}/revisions")
+def session_revisions(
+    session_id: str,
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 5.4 (AR-8, AR-34): the revision-selector projection. Every
+    request independently re-checks admission and creator ownership, same
+    pattern as `session_progress`/`session_results`. A session with no
+    revisions yet (Analyze not run, or preparation still deriving) is a
+    legitimately owned session with nothing to list — `{"revisions": []}`,
+    never a 404. Only `revision_number`/`published`/`published_at`/
+    `is_current` ever leave this function (NFR-12) — no internal `status`
+    column, no `requested_version`/`published_version` counters."""
+    if len(session_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+    table = AnalysisSession.__table__
+    row = authorize_owned_row(
+        db, identity, table, table.c.id, table.c.creator_subject, session_id
+    )
+    if row is None or row["creator_issuer"] != identity.issuer:
+        raise _NOT_FOUND
+
+    revision_table = AnalysisRevision.__table__
+    revision_rows = (
+        db.execute(
+            select(revision_table.c.revision_number, revision_table.c.published_at)
+            .where(revision_table.c.analysis_session_id == session_id)
+            .order_by(revision_table.c.revision_number.desc())
+        )
+        .mappings()
+        .all()
+    )
+    published_numbers = [r["revision_number"] for r in revision_rows if r["published_at"] is not None]
+    current_published_number = max(published_numbers) if published_numbers else None
+
+    return {
+        "revisions": [
+            {
+                "revision_number": r["revision_number"],
+                "published": r["published_at"] is not None,
+                "published_at": r["published_at"].isoformat() if r["published_at"] is not None else None,
+                "is_current": r["revision_number"] == current_published_number,
+            }
+            for r in revision_rows
+        ]
     }
 
 
@@ -308,15 +363,28 @@ def _candidate_display_name(display_name: str | None, document_reference: str) -
 @router.get("/sessions/{session_id}/results")
 def session_results(
     session_id: str,
+    # Bounds match Postgres int4 range (AnalysisRevision.revision_number is
+    # an Integer column) — review finding: an out-of-range value would
+    # otherwise reach Postgres and raise a raw DataError/500 instead of
+    # this module's own neutral-404 contract.
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
     identity: Identity = Depends(require_admitted_identity),
     db: OrmSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Story 5.2 (AR-8, AR-27-33, AR-46): every read independently re-checks
     admission and creator ownership, mirroring `session_progress` exactly.
-    Reads only the current published revision (highest `revision_number`
-    with `published_at IS NOT NULL`) — no revision selector/older-revision
-    navigation here (Story 5.4's scope). Only the fields listed below ever
-    leave this function (NFR-12): no raw `candidate_proposals.items_json`
+    Without `revision_number` (every existing caller), reads the current
+    published revision (highest `revision_number` with `published_at IS NOT
+    NULL`) exactly as before — unchanged regression-safe default. Story 5.4
+    adds the optional `revision_number` filter to view a specific owned
+    revision (older published, for the revision selector's "older views" —
+    AC#1); a `revision_number` that doesn't exist for this session, or
+    exists but isn't published, both fall through to the same
+    `_not_yet_published_results()` neutral shape as "nothing published yet"
+    — collapsing those cases so a tampered/stale value cannot be used to
+    probe whether a given revision number exists (Story 5.3's "neutral...
+    without disclosing ownership" principle). Only the fields listed below
+    ever leave this function (NFR-12): no raw `candidate_proposals.items_json`
     (only its `summarize_evidence` derivation), no `candidate_jobs`
     lease/generation/token fields, no storage paths, no precise-score
     numerator/denominator pairs (only the already-rounded
@@ -332,17 +400,45 @@ def session_results(
         raise _NOT_FOUND
 
     revision_table = AnalysisRevision.__table__
-    revision_row = (
-        db.execute(
-            select(revision_table)
-            .where(revision_table.c.analysis_session_id == session_id)
-            .where(revision_table.c.published_at.is_not(None))
-            .order_by(revision_table.c.revision_number.desc())
-            .limit(1)
+
+    if revision_number is None:
+        # The highest-numbered published revision IS "current" by
+        # definition — no second query needed to prove it (review finding:
+        # the prior version ran a redundant, non-snapshotted second query
+        # here even in this default path).
+        revision_row = (
+            db.execute(
+                select(revision_table)
+                .where(revision_table.c.analysis_session_id == session_id)
+                .where(revision_table.c.published_at.is_not(None))
+                .order_by(revision_table.c.revision_number.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
         )
-        .mappings()
-        .one_or_none()
-    )
+        is_current = revision_row is not None
+    else:
+        revision_row = (
+            db.execute(
+                select(revision_table)
+                .where(revision_table.c.analysis_session_id == session_id)
+                .where(revision_table.c.revision_number == revision_number)
+                .where(revision_table.c.published_at.is_not(None))
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if revision_row is not None:
+            current_published_number = db.execute(
+                select(revision_table.c.revision_number)
+                .where(revision_table.c.analysis_session_id == session_id)
+                .where(revision_table.c.published_at.is_not(None))
+                .order_by(revision_table.c.revision_number.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            is_current = revision_row["revision_number"] == current_published_number
     if revision_row is None:
         return _not_yet_published_results()
 
@@ -516,6 +612,7 @@ def session_results(
         "published": True,
         "revision_number": revision_row["revision_number"],
         "published_at": revision_row["published_at"].isoformat(),
+        "is_current": is_current,
         "counts": {
             "ranked": revision_row["ranked_count"],
             "needs_review": revision_row["needs_review_count"],

@@ -78,6 +78,28 @@ main {
   margin-bottom: 4px;
 }
 
+/* DESIGN.md's revision-selector token block — identical values to .panel's. */
+.revision-selector {
+  border: 1px solid var(--strong);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--panel);
+  margin: 16px 0;
+}
+.revision-selector label {
+  margin: 0 0 4px;
+}
+.revision-selector select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 16px;
+  background: var(--panel);
+  color: var(--text);
+}
+
 .notice {
   background: var(--info);
   color: var(--info-text);
