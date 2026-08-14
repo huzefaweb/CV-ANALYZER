@@ -49,6 +49,7 @@ def test_full_mix_returns_every_row_uncapped_in_frozen_component_order():
             state="Not Found",
             locator_description=None,
             excerpt="",
+            job_requirement_id="r-mandatory-1",
         ),
         EvidenceRow(
             requirement_display_id="REQ-2",
@@ -56,6 +57,7 @@ def test_full_mix_returns_every_row_uncapped_in_frozen_component_order():
             state="Needs Validation",
             locator_description=None,
             excerpt="",
+            job_requirement_id="r-experience-1",
         ),
         EvidenceRow(
             requirement_display_id="REQ-3",
@@ -63,6 +65,7 @@ def test_full_mix_returns_every_row_uncapped_in_frozen_component_order():
             state="Matched",
             locator_description="Page 2",
             excerpt="led on-call rotation",
+            job_requirement_id="r-responsibility-1",
         ),
         EvidenceRow(
             requirement_display_id="REQ-4",
@@ -70,6 +73,7 @@ def test_full_mix_returns_every_row_uncapped_in_frozen_component_order():
             state="Partial",
             locator_description=None,
             excerpt="",
+            job_requirement_id="r-preferred-1",
         ),
     ]
 

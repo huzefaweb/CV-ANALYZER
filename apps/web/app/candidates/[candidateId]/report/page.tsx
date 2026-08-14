@@ -10,6 +10,7 @@ import {
   parseRevisionParam,
   shortlistLabel,
 } from "@/lib/resultsFormatting";
+import EvidenceSection, { type EvidenceRow } from "./EvidenceSection";
 
 export const dynamic = "force-dynamic";
 
@@ -39,15 +40,6 @@ type NeedsReviewReport = Omit<RankedReport, "outcome" | "headline_whole_percent"
 };
 
 type CandidateReport = RankedReport | NeedsReviewReport;
-
-type EvidenceRow = {
-  requirement_display_id: string;
-  requirement_text: string;
-  state: string;
-  locator_description: string | null;
-  excerpt: string;
-  recruiter_review: string;
-};
 
 type EvidenceProjection = {
   candidate_id: string;
@@ -220,26 +212,15 @@ export default async function CandidateReportPage({
 
       <section className="panel">
         <h2>Evidence</h2>
-        {evidence === null || evidence.rows.length === 0 ? (
+        {evidence === null ? (
           <p>No Evidence rows recorded for this Candidate.</p>
         ) : (
-          evidence.rows.map((row, i) => (
-            <details key={i}>
-              <summary>
-                {row.requirement_display_id} · {row.requirement_text} · {row.state}
-              </summary>
-              <p>Analysis state: {row.state}</p>
-              <p>Recruiter review: {row.recruiter_review === "NoReviewFlag" ? "No review flag" : row.recruiter_review}</p>
-              {row.state === "Not Found" ? (
-                <p>No supporting Evidence was located. This is not proof the Candidate lacks the qualification.</p>
-              ) : (
-                <>
-                  <p>{row.locator_description ?? "No source location recorded."}</p>
-                  <p>{row.excerpt || "No excerpt recorded."}</p>
-                </>
-              )}
-            </details>
-          ))
+          <EvidenceSection
+            key={data.revision_number}
+            candidateId={data.candidate_id}
+            revisionNumber={data.revision_number}
+            rows={evidence.rows}
+          />
         )}
       </section>
 
@@ -290,7 +271,6 @@ export default async function CandidateReportPage({
       ) : null}
 
       <p>{shortlistLabel(data.shortlist_state)}</p>
-      <p>No Disputed conclusions in this revision.</p>
 
       <p>
         <a href={`/workspace/sessions/${data.analysis_session_id}/results?revision=${data.revision_number}`}>

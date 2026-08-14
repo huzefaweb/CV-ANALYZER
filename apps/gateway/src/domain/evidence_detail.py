@@ -39,6 +39,10 @@ class EvidenceRow:
     state: str
     locator_description: str | None
     excerpt: str
+    # Story 6.3 (AR-32): the raw Job Requirement id, exposed so a caller can
+    # key a per-row Disputed review record to this exact Evidence row — the
+    # display id alone (e.g. "MS-1") is not a stable join key across tables.
+    job_requirement_id: str
 
 
 def _component_order_index(component: Component) -> int:
@@ -105,6 +109,7 @@ def build_evidence_rows(
                 state=state,
                 locator_description=locator_description,
                 excerpt=excerpt,
+                job_requirement_id=requirement_id,
             )
         )
     return rows

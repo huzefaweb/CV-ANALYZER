@@ -9,11 +9,15 @@ caller, not a reason to write new admission or ownership primitives.
 from __future__ import annotations
 
 import sys
+import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
 from ..domain.evidence_detail import build_evidence_rows
@@ -34,6 +38,7 @@ from .models import (
     CandidateProposal,
     CandidateResult,
     Document,
+    EvidenceReview,
     JobRequirement,
     ParseArtifact,
     RevisionMembership,
@@ -860,6 +865,16 @@ def candidate_report(
         raise _NOT_FOUND
 
 
+def _review_projection(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Story 6.3: row absence -> the implicit default state (never
+    disputed, version 0) — shared by `candidate_evidence`'s read and
+    `evidence_review`'s own response bodies so both endpoints describe
+    "no review flag" identically."""
+    if row is None:
+        return {"state": "NoReviewFlag", "version": 0}
+    return {"state": "Disputed" if row["disputed"] else "NoReviewFlag", "version": row["version"]}
+
+
 @router.get("/candidates/{candidate_id}/evidence")
 def candidate_evidence(
     candidate_id: str,
@@ -977,18 +992,41 @@ def candidate_evidence(
 
         rows = build_evidence_rows(items, requirement_texts, requirement_display_ids, requirement_components, unit_locators)
 
+        # Story 6.3: real per-row Disputed review state, replacing the
+        # constant "NoReviewFlag" placeholder Story 6.2 disclosed as
+        # pending this story. At most one row per job_requirement_id by
+        # the table's own unique index — a row's absence means the
+        # implicit default (not disputed, version 0).
+        reviews_table = EvidenceReview.__table__
+        review_rows = (
+            db.execute(
+                select(
+                    reviews_table.c.job_requirement_id,
+                    reviews_table.c.disputed,
+                    reviews_table.c.version,
+                ).where(
+                    (reviews_table.c.analysis_revision_id == revision_id)
+                    & (reviews_table.c.candidate_id == candidate_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        reviews_by_requirement = {r["job_requirement_id"]: r for r in review_rows}
+
         return {
             "candidate_id": candidate_id,
             "revision_number": revision_row["revision_number"],
             "is_current": is_current,
             "rows": [
                 {
+                    "job_requirement_id": row.job_requirement_id,
                     "requirement_display_id": row.requirement_display_id,
                     "requirement_text": row.requirement_text,
                     "state": row.state,
                     "locator_description": row.locator_description,
                     "excerpt": row.excerpt,
-                    "recruiter_review": "NoReviewFlag",
+                    "review": _review_projection(reviews_by_requirement.get(row.job_requirement_id)),
                 }
                 for row in rows
             ],
@@ -1122,4 +1160,252 @@ def candidate_reconciliation(
         # own .get() access, not KeyError/TypeError — must still collapse
         # to the neutral 404, not a 500.
         print(f"candidate_reconciliation: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+class EvidenceReviewRequest(BaseModel):
+    disputed: bool
+    # Review finding (Edge Case Hunter): an unbounded expected_version
+    # reaches the CAS UPDATE's Postgres Integer bind param — out-of-INT32
+    # range raised an uncaught DataError (500) instead of a clean 4xx.
+    # Bounded the same way revision_number already is on this endpoint.
+    expected_version: int = Field(ge=0, le=2147483647)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.put("/candidates/{candidate_id}/evidence/{job_requirement_id}/review")
+def evidence_review(
+    candidate_id: str,
+    job_requirement_id: str,
+    body: EvidenceReviewRequest,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.3 (AC#1, AC#3; AR-7-8, AR-32, AR-34): mark/clear the
+    Disputed review flag on one Evidence row, scoped to one Analysis
+    Revision. Never mutates classification, Evidence, score, rank, or any
+    other revision's review state — `evidence_reviews`' own unique key
+    (`analysis_revision_id`, `candidate_id`, `job_requirement_id`)
+    guarantees that structurally, not application logic alone. Same
+    two-hop ownership + outcome qualification `candidate_evidence` uses,
+    plus an explicit "does this Evidence row actually exist for this
+    Candidate" check (AR-32: the actor must independently own the
+    Evidence row too, not just the Candidate/revision) — a Requirement
+    with no evaluated proposal item (Needs Review's empty `items_json`,
+    or a requirement id from a different session) has nothing to mark
+    Disputed and collapses to the same neutral 404 as any other
+    ownership miss. CAS/idempotency shape mirrors `document_upload.py`'s
+    `remove_document`/`replace_document` verbatim — the only prior
+    precedent for this mutation pattern in this codebase."""
+    if len(job_requirement_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    candidates_table = Candidate.__table__
+    revision_id = revision_row["id"]
+
+    memberships_table = RevisionMembership.__table__
+    results_table = CandidateResult.__table__
+    member_row = (
+        db.execute(
+            select(
+                memberships_table.c.outcome,
+                results_table.c.candidate_job_id,
+            )
+            .select_from(candidates_table)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .where(candidates_table.c.id == candidate_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult", "NeedsReview"):
+        raise _NOT_FOUND
+
+    try:
+        proposals_table = CandidateProposal.__table__
+        items: list[dict] = []
+        if member_row["candidate_job_id"] is not None:
+            proposal_row = (
+                db.execute(
+                    select(proposals_table.c.items_json).where(
+                        proposals_table.c.candidate_job_id == member_row["candidate_job_id"]
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            items = proposal_row["items_json"] if proposal_row is not None else []
+
+        # AR-32: the Evidence row itself must exist for this Candidate.
+        if not any(str(item.get("job_requirement_id")) == job_requirement_id for item in items):
+            raise _NOT_FOUND
+
+        reviews_table = EvidenceReview.__table__
+        existing = (
+            db.execute(
+                select(reviews_table).where(
+                    (reviews_table.c.analysis_revision_id == revision_id)
+                    & (reviews_table.c.candidate_id == candidate_id)
+                    & (reviews_table.c.job_requirement_id == job_requirement_id)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+        if existing is None:
+            if body.disputed is False:
+                # Clearing an already-clear flag is an idempotent no-op —
+                # never materialize a row for "no change" (Dev Notes).
+                # Review finding (Blind Hunter, TOCTOU): the row this
+                # branch's caller read may have been created by a
+                # concurrent first-set between that read and this
+                # response. Re-check immediately before responding so a
+                # 200 here can never contradict what is actually
+                # persisted a moment later — narrows the race window to
+                # the theoretical minimum without adding lock
+                # infrastructure (ponytail: a single-Recruiter-per-session
+                # V1 demo tool has no realistic double-tab race on the
+                # same Evidence row; full elimination would need an
+                # advisory lock or restructuring the "no row" state into
+                # a real UPSERT, upgrade path if that scale ever matters).
+                current = (
+                    db.execute(
+                        select(reviews_table).where(
+                            (reviews_table.c.analysis_revision_id == revision_id)
+                            & (reviews_table.c.candidate_id == candidate_id)
+                            & (reviews_table.c.job_requirement_id == job_requirement_id)
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if current is None:
+                    return {"job_requirement_id": job_requirement_id, "disputed": False, "version": 0}
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "job_requirement_id": job_requirement_id,
+                        "disputed": current["disputed"],
+                        "version": current["version"],
+                    },
+                )
+            if body.expected_version != 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"job_requirement_id": job_requirement_id, "disputed": False, "version": 0},
+                )
+            now = datetime.now(timezone.utc)
+            insert_stmt = reviews_table.insert().values(
+                id=str(uuid.uuid4()),
+                analysis_revision_id=revision_id,
+                candidate_id=candidate_id,
+                job_requirement_id=job_requirement_id,
+                disputed=True,
+                version=1,
+                last_command_idempotency_key=body.idempotency_key,
+                created_at=now,
+                updated_at=now,
+            )
+            try:
+                db.execute(insert_stmt)
+                db.commit()
+            except IntegrityError:
+                # A concurrent identical first-set request won the race —
+                # re-read and fall through to the existing-row branch
+                # below, which resolves replay vs. genuine conflict.
+                db.rollback()
+                existing = (
+                    db.execute(
+                        select(reviews_table).where(
+                            (reviews_table.c.analysis_revision_id == revision_id)
+                            & (reviews_table.c.candidate_id == candidate_id)
+                            & (reviews_table.c.job_requirement_id == job_requirement_id)
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            else:
+                return {"job_requirement_id": job_requirement_id, "disputed": True, "version": 1}
+
+        # Existing row (found originally, or lost the insert race above):
+        # idempotent replay short-circuits before the CAS (mirrors
+        # remove_document's exact pattern).
+        if existing["last_command_idempotency_key"] == body.idempotency_key:
+            if existing["disputed"] == body.disputed:
+                return {
+                    "job_requirement_id": job_requirement_id,
+                    "disputed": existing["disputed"],
+                    "version": existing["version"],
+                }
+            # Review finding (Edge Case Hunter): the same idempotency_key
+            # reused for a DIFFERENT disputed value is not a replay of an
+            # earlier command — it's a genuine idempotency-guarantee
+            # violation (unlike document_upload.py's remove/replace,
+            # whose target value is a fixed constant, this endpoint's
+            # `disputed` varies, so "same key" alone can't imply "same
+            # command"). Reject rather than silently applying it as a new
+            # mutation under a reused key.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "job_requirement_id": job_requirement_id,
+                    "disputed": existing["disputed"],
+                    "version": existing["version"],
+                },
+            )
+
+        result = db.execute(
+            reviews_table.update()
+            .where(reviews_table.c.id == existing["id"])
+            .where(reviews_table.c.version == body.expected_version)
+            .values(
+                disputed=body.disputed,
+                version=reviews_table.c.version + 1,
+                last_command_idempotency_key=body.idempotency_key,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        if result.rowcount == 0:
+            db.rollback()
+            current = db.execute(select(reviews_table).where(reviews_table.c.id == existing["id"])).mappings().one()
+            if current["last_command_idempotency_key"] == body.idempotency_key and current["disputed"] == body.disputed:
+                return {
+                    "job_requirement_id": job_requirement_id,
+                    "disputed": current["disputed"],
+                    "version": current["version"],
+                }
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "job_requirement_id": job_requirement_id,
+                    "disputed": current["disputed"],
+                    "version": current["version"],
+                },
+            )
+
+        db.commit()
+        updated = db.execute(select(reviews_table).where(reviews_table.c.id == existing["id"])).mappings().one()
+        return {"job_requirement_id": job_requirement_id, "disputed": updated["disputed"], "version": updated["version"]}
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        db.rollback()
+        print(
+            f"evidence_review: candidate {candidate_id} requirement {job_requirement_id} in revision {revision_id} — {exc}",
+            file=sys.stderr,
+        )
         raise _NOT_FOUND

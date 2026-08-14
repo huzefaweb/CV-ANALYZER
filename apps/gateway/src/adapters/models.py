@@ -364,3 +364,31 @@ class Shortlist(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EvidenceReview(Base):
+    """Story 6.3 (AR-32): one revision-specific "Disputed" review record per
+    (Analysis Revision, Candidate, Job Requirement) Evidence row — enforced
+    by a unique index, not application logic alone (matches `ParseArtifact`'s/
+    `CandidateProposal`'s existing unique-natural-key convention). A row's
+    *absence* means the implicit default state (`disputed=False`,
+    `version=0`) — a row is only ever inserted the first time a conclusion
+    is actually marked Disputed (never eagerly created for every Evidence
+    row, unlike `Shortlist`'s eager-default-on-finalization precedent).
+    `last_command_idempotency_key` mirrors `Document.last_command_
+    idempotency_key`'s exact replay-marker semantics: the key of the most
+    recently applied Disputed-toggle command on this row, read back against
+    the row's own current state to distinguish a genuine replay from a
+    stale/conflicting command (CAS `version` is the concurrency guard)."""
+
+    __tablename__ = "evidence_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    job_requirement_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    disputed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_command_idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

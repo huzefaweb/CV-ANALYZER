@@ -32,6 +32,7 @@ from src.adapters.models import (
     CandidateProposal,
     CandidateResult,
     Document,
+    EvidenceReview,
     JobRequirement,
     ParseArtifact,
     RevisionMembership,
@@ -56,7 +57,7 @@ def db():
 def _clean_tables(db):
     db.execute(
         text(
-            "TRUNCATE TABLE sessions, users, shortlists, candidate_proposals, candidate_results, "
+            "TRUNCATE TABLE sessions, users, shortlists, evidence_reviews, candidate_proposals, candidate_results, "
             "candidate_identities, parse_artifacts, revision_memberships, candidate_jobs, "
             "job_requirements, candidates, documents, analysis_revisions, analysis_sessions CASCADE"
         )
@@ -282,11 +283,15 @@ def test_full_state_mix_returns_every_row_with_locator_and_excerpt(db):
     by_state = {row["state"]: row for row in body["rows"]}
     assert by_state["Matched"]["locator_description"] == "Page 2"
     assert by_state["Matched"]["excerpt"] == "ran K8s clusters"
-    assert by_state["Matched"]["recruiter_review"] == "NoReviewFlag"
+    assert by_state["Matched"]["review"] == {"state": "NoReviewFlag", "version": 0}
+    assert by_state["Matched"]["job_requirement_id"] == matched_req
     assert by_state["Partial"]["locator_description"] == "body/p[3]"
     assert by_state["Needs Validation"]["locator_description"] is None
     assert by_state["Not Found"]["locator_description"] is None
     assert by_state["Not Found"]["excerpt"] == ""
+    # Story 6.3 (Task 6): zero evidence_reviews rows -> every row's review
+    # is the implicit default, not just the one asserted above.
+    assert all(row["review"] == {"state": "NoReviewFlag", "version": 0} for row in body["rows"])
 
 
 def test_needs_review_candidate_with_empty_items_returns_empty_rows(db):
@@ -377,3 +382,49 @@ def test_unrecognized_component_on_one_requirement_is_skipped_not_a_500(db):
     rows = response.json()["rows"]
     assert len(rows) == 1
     assert rows[0]["requirement_text"] == "Kubernetes operations"
+
+
+def test_disputed_and_undisputed_rows_project_real_review_state(db):
+    """Story 6.3 (Task 6): one Disputed and one un-Disputed requirement
+    render their real per-row review state/version, not the Story 6.2
+    constant placeholder."""
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    disputed_req = _seed_requirement(db, session_id, "R1", "mandatory_skills", "Kubernetes operations")
+    clean_req = _seed_requirement(db, session_id, "R2", "relevant_experience", "Incident leadership")
+    revision_id = _seed_revision(db, session_id, published_at=datetime.now(timezone.utc))
+    candidate_id = _seed_candidate(
+        db,
+        revision_id=revision_id,
+        session_id=session_id,
+        document_reference="D1",
+        outcome="NewResult",
+        proposal_items=[
+            {"job_requirement_id": disputed_req, "state": "Matched", "locator": "", "excerpt": ""},
+            {"job_requirement_id": clean_req, "state": "Matched", "locator": "", "excerpt": ""},
+        ],
+    )
+    now = datetime.now(timezone.utc)
+    db.add(
+        EvidenceReview(
+            id=str(uuid.uuid4()),
+            analysis_revision_id=revision_id,
+            candidate_id=candidate_id,
+            job_requirement_id=disputed_req,
+            disputed=True,
+            version=3,
+            last_command_idempotency_key=str(uuid.uuid4()),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/evidence")
+    client.cookies.clear()
+
+    assert response.status_code == 200
+    by_requirement = {row["job_requirement_id"]: row for row in response.json()["rows"]}
+    assert by_requirement[disputed_req]["review"] == {"state": "Disputed", "version": 3}
+    assert by_requirement[clean_req]["review"] == {"state": "NoReviewFlag", "version": 0}
