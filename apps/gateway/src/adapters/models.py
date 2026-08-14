@@ -398,3 +398,60 @@ class EvidenceReview(Base):
     last_command_idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class QuestionSetJob(Base):
+    """Story 7.1 (AR-14-17, AR-34): one Interview Question Set generation job
+    per (Candidate, published Analysis Revision) — mirrors `CandidateJob`'s
+    per-revision-membership shape, unique on `(candidate_id,
+    analysis_revision_id)` (migration `d2e3f4a5b6c7`'s composite index, not
+    declared again here — matches this codebase's existing convention of
+    enforcing composite uniqueness via the migration alone, e.g.
+    `ParseArtifact`/`CandidateProposal`).
+
+    Code review fix (Acceptance Auditor, High): an earlier version of this
+    model was unique on `candidate_id` alone, reasoning the Question Set was
+    "Candidate-owned" like `Shortlist`. That broke AC#1's "one versioned
+    operation/job exists for that [Candidate] Result" — a second published
+    revision's successful Result could never get a job at all, permanently,
+    since the Candidate's one lineage slot was already taken. Revision
+    scoping fixes this: each revision's successful Result gets its own
+    independent, generatable job. `status` cycles
+    `queued -> claimed -> completed`/`failed`, mirroring `CandidateJob`; the
+    lease/fencing columns are Story 4.1's exact shape
+    (`generation`/`lease_token`/`lease_expires_at`/`state_version`/
+    `reclaim_count`/`attempt`/`failure_reason`)."""
+
+    __tablename__ = "question_set_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reclaim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class QuestionSetProposal(Base):
+    """Story 7.1 (AR-17, AR-40): one immutable, worker-staged Interview
+    Question Set proposal per `QuestionSetJob` — same exactly-once-per-job
+    shape as `CandidateProposal` (a unique index on `question_set_job_id`
+    makes a duplicate fenced write a no-op, never a second row). This is a
+    fenced proposal only, not a published Question Set Version — 7.2's
+    coordinator is the future reader/publisher of this row."""
+
+    __tablename__ = "question_set_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    question_set_job_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    items_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

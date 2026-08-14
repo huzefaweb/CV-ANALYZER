@@ -12,6 +12,7 @@ import {
 } from "@/lib/resultsFormatting";
 import EvidenceSection, { type EvidenceRow } from "./EvidenceSection";
 import ShortlistToggle from "@/app/ShortlistToggle";
+import QuestionSetControl from "@/app/QuestionSetControl";
 
 export const dynamic = "force-dynamic";
 
@@ -34,9 +35,13 @@ type RankedReport = {
   notice: { version: number; text: string };
   headline_whole_percent: number;
   precise_score_percent: string | null;
+  question_set_state: "NotGenerated" | "Generating";
 };
 
-type NeedsReviewReport = Omit<RankedReport, "outcome" | "headline_whole_percent" | "precise_score_percent"> & {
+type NeedsReviewReport = Omit<
+  RankedReport,
+  "outcome" | "headline_whole_percent" | "precise_score_percent" | "question_set_state"
+> & {
   outcome: "NeedsReview";
   gate_codes: string[];
 };
@@ -279,6 +284,14 @@ export default async function CandidateReportPage({
         initialVersion={data.shortlist_version}
       />
       {data.outcome === "NeedsReview" ? <p>{SHORTLIST_RETENTION_NOTE}</p> : null}
+
+      {data.outcome === "Ranked" ? (
+        <QuestionSetControl
+          candidateId={data.candidate_id}
+          revisionNumber={data.revision_number}
+          initialState={data.question_set_state}
+        />
+      ) : null}
 
       <p>
         <a href={`/workspace/sessions/${data.analysis_session_id}/results?revision=${data.revision_number}`}>

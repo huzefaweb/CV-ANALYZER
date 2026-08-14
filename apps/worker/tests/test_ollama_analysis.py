@@ -16,6 +16,7 @@ import pytest
 
 from src.adapters import ollama_analysis
 from src.domain.analysis_provider import AnalysisProviderError, JobRequirement, ResumeSourceUnit
+from src.domain.question_context import GroundedRequirement
 
 REQUIREMENTS = [JobRequirement(id="JR-1", text="Python experience")]
 UNITS = [ResumeSourceUnit(id="unit-1", text="5 years of Python.")]
@@ -137,3 +138,42 @@ def test_no_raw_provider_detail_leaks_into_category(monkeypatch):
         _propose()
     assert "secret-model-v7" not in str(exc_info.value)
     assert "traceback" not in str(exc_info.value)
+
+
+# Story 7.1 code review addition (Acceptance Auditor, High): AC#2 is
+# entirely about the constructed provider request, and nothing in the
+# original diff inspected it. Mirrors _build_user_message having no
+# dedicated construction test either — this closes the analogous gap for
+# the new question-generation prompt at the same (cheap, structural) level.
+def test_question_user_message_carries_only_grounded_fields_fenced_as_untrusted():
+    grounded = [
+        GroundedRequirement(
+            job_requirement_id="JR-1",
+            requirement_text="Kubernetes operations",
+            state="Matched",
+            locator_description="Page 2",
+            excerpt="Led Kubernetes cluster operations",
+        ),
+        GroundedRequirement(
+            job_requirement_id="JR-2",
+            requirement_text="Kafka production operations",
+            state="Not Found",
+            locator_description=None,
+            excerpt="",
+        ),
+    ]
+    message = ollama_analysis._build_question_user_message(grounded)
+    assert "<grounded_context>" in message and "</grounded_context>" in message
+    assert "JR-1" in message and "Kubernetes operations" in message and "Page 2" in message
+    assert "JR-2" in message and "Not Found" in message
+    # Never a name/email/phone/identity field — GroundedRequirement itself
+    # has no such field, so this is a structural guarantee, not luck; this
+    # assertion documents that invariant explicitly.
+    assert "@" not in message
+
+
+def test_question_system_prompt_frames_evidence_excerpts_as_untrusted_data():
+    prompt = ollama_analysis._QUESTION_SYSTEM_PROMPT
+    assert "ignore" in prompt.lower() and "excerpt" in prompt.lower()
+    assert "ten" in prompt.lower()
+    assert "technical_functional" in prompt and "gap_focused" in prompt

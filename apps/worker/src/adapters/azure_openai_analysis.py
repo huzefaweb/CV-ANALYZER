@@ -12,6 +12,7 @@ calls this module while AZURE_OPENAI_* env vars are absent.
 from __future__ import annotations
 
 from ..domain.analysis_provider import JobRequirement, ResumeSourceUnit
+from ..domain.question_context import GroundedRequirement
 
 
 class AzureOpenAINotConfigured(Exception):
@@ -33,6 +34,18 @@ def propose(
 
 def derive_requirements(
     job_description_text: str,
+    *,
+    base_url: str,
+    model: str = "",
+    timeout: float = 60.0,
+):
+    raise AzureOpenAINotConfigured(
+        "Azure OpenAI adapter preflight is deferred (AC#1) until AZURE_OPENAI_* env vars are configured."
+    )
+
+
+def propose_questions(
+    grounded: list[GroundedRequirement],
     *,
     base_url: str,
     model: str = "",

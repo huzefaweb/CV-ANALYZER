@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-from .adapters import candidate_claim, preparation_claim
+from .adapters import candidate_claim, preparation_claim, question_set_claim
 from .adapters import resume_parsing
 from .adapters import source_unit_serialization
 from .adapters.analysis_selection import get_active_adapter
@@ -28,6 +28,8 @@ from .domain import identity_extraction
 from .domain import quality_provenance
 from .domain.analysis_provider import AnalysisProviderError, FailureReason, JobRequirement, validate_locators
 from .domain.parse_gates import GateCode, ParseFatalError
+from .domain.question_context import build_grounded_context
+from .domain.question_provider import validate_question_grounding, validate_question_shape
 
 POLL_INTERVAL_SECONDS = 2
 HEARTBEAT_SECONDS = 4
@@ -356,19 +358,154 @@ def _process_one_candidate(conn: psycopg.Connection, settings: Settings) -> bool
     return True
 
 
+def _process_one_question_set(conn: psycopg.Connection, settings: Settings) -> bool:
+    """Claims and processes at most one queued Question Set job (Story 7.1):
+    claim -> read grounded context (already-persisted Job Requirements +
+    the Candidate's existing Evidence proposal + source-unit locators, no
+    parse phase needed) -> provider call -> stage fenced proposal or
+    failure. Returns True if a row was claimed (whether it ultimately
+    succeeded or failed), False otherwise."""
+    claimed = question_set_claim.claim_queued(conn)
+    if claimed is None:
+        return False
+
+    stop_heartbeat = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_run_heartbeat,
+        args=(settings.database_url, claimed.id, claimed.generation, claimed.token, stop_heartbeat),
+        kwargs={"heartbeat_fn": question_set_claim.heartbeat},
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        # Code review fix (Blind Hunter/Edge Case Hunter, High): the fetch/
+        # build phase previously ran with no except at all — a malformed
+        # historical proposal item, a missing requirement, or any DB hiccup
+        # propagated uncaught to `_poll_loop`'s catch-all, leaving the row
+        # `claimed` with a live lease and no attempt consumed (compounded by
+        # the also-fixed missing recovery-sweep coverage). Mirrors
+        # `_process_one_candidate`'s identical pre-provider-checkpoint
+        # guard (`except Exception` around parsing, staging a failure that
+        # counts against the attempt budget rather than silently rotting).
+        try:
+            requirement_texts, proposal_items, unit_locators = question_set_claim.fetch_grounded_data(
+                conn, claimed.candidate_id, claimed.analysis_revision_id
+            )
+            grounded = build_grounded_context(proposal_items, requirement_texts, unit_locators)
+        except Exception as exc:  # noqa: BLE001 - must still count against the attempt budget
+            print(f"question set job {claimed.id}: unexpected error building grounded context: {exc}", file=sys.stderr)
+            mapped = AnalysisProviderError(FailureReason.INTERRUPTED)
+            staged = question_set_claim.stage_failure(
+                conn, claimed.id, claimed.attempt, claimed.generation, claimed.token, mapped.category
+            )
+            if not staged:
+                print(
+                    f"question set job {claimed.id}: stage_failure rejected — lease no longer held",
+                    file=sys.stderr,
+                )
+            return True
+
+        if not grounded:
+            # Code review fix (all 3 layers, High): a Candidate with no
+            # persisted Evidence proposal (or an empty one, e.g. the
+            # COVERAGE_BELOW_7000_BPS budget-overflow staging path) must
+            # never reach the provider — ten "grounded" questions with zero
+            # actual grounding is exactly the fabrication NFR-1 forbids.
+            mapped = AnalysisProviderError(FailureReason.MALFORMED)
+            staged = question_set_claim.stage_failure(
+                conn, claimed.id, claimed.attempt, claimed.generation, claimed.token, mapped.category
+            )
+            if not staged:
+                print(
+                    f"question set job {claimed.id}: stage_failure rejected — lease no longer held",
+                    file=sys.stderr,
+                )
+            return True
+
+        try:
+            adapter = get_active_adapter(settings)
+            proposal = adapter.propose_questions(grounded, base_url=settings.ollama_host)
+            validate_question_shape(proposal)
+            validate_question_grounding(proposal, grounded)
+        except AnalysisProviderError as exc:
+            staged = question_set_claim.stage_failure(
+                conn, claimed.id, claimed.attempt, claimed.generation, claimed.token, exc.category
+            )
+            if not staged:
+                print(
+                    f"question set job {claimed.id}: stage_failure rejected — lease no longer held",
+                    file=sys.stderr,
+                )
+            return True
+        except ValueError as exc:
+            # Locally-detected malformed shape (validate_question_shape) —
+            # same sanitized failure vocabulary/staging path as an
+            # adapter-raised failure, not a second one.
+            mapped = AnalysisProviderError(FailureReason.MALFORMED)
+            staged = question_set_claim.stage_failure(
+                conn, claimed.id, claimed.attempt, claimed.generation, claimed.token, mapped.category
+            )
+            if not staged:
+                print(
+                    f"question set job {claimed.id}: stage_failure rejected — lease no longer held",
+                    file=sys.stderr,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001 - an unclassified failure must still count
+            # against the attempt budget, not silently rot until lease
+            # expiry + recovery-sweep reclaim.
+            print(f"question set job {claimed.id}: unexpected error during provider phase: {exc}", file=sys.stderr)
+            mapped = AnalysisProviderError(FailureReason.INTERRUPTED)
+            staged = question_set_claim.stage_failure(
+                conn, claimed.id, claimed.attempt, claimed.generation, claimed.token, mapped.category
+            )
+            if not staged:
+                print(
+                    f"question set job {claimed.id}: stage_failure rejected — lease no longer held",
+                    file=sys.stderr,
+                )
+            return True
+
+        staged = question_set_claim.stage_success(
+            conn,
+            claimed.id,
+            claimed.generation,
+            claimed.token,
+            candidate_id=claimed.candidate_id,
+            analysis_revision_id=claimed.analysis_revision_id,
+            items_json=[item.model_dump() for item in proposal.items],
+        )
+        if not staged:
+            print(
+                f"question set job {claimed.id}: stage_success rejected — lease no longer held",
+                file=sys.stderr,
+            )
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=HEARTBEAT_SECONDS * 2)
+        if heartbeat_thread.is_alive():
+            print(
+                f"question set job {claimed.id}: heartbeat thread did not stop in time (leaked, daemon)",
+                file=sys.stderr,
+            )
+    return True
+
+
 def _poll_loop(settings: Settings) -> None:
     # ponytail: single-threaded poll loop, one job at a time — a dedicated
     # worker pool/queue depth is a scaling concern for later stories, not
-    # V1's single-demo-session scale. Story 4.4: only try a Candidate job
-    # this tick if no preparation was claimed — each tick claims at most one
-    # row total either way, so over successive ticks neither queue starves
-    # the other at V1's small demo scale.
+    # V1's single-demo-session scale. Story 4.4/7.1: only try the next queue
+    # (Candidate jobs, then Question Set jobs) this tick if every earlier
+    # queue claimed nothing — each tick claims at most one row total either
+    # way, so over successive ticks no queue starves the others at V1's
+    # small demo scale.
     conn = psycopg.connect(settings.database_url, autocommit=True)
     try:
         while True:
             try:
                 if not _process_one(conn, settings):
-                    _process_one_candidate(conn, settings)
+                    if not _process_one_candidate(conn, settings):
+                        _process_one_question_set(conn, settings)
             except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
                 print(f"worker claim loop iteration failed: {exc}", file=sys.stderr)
             time.sleep(POLL_INTERVAL_SECONDS)

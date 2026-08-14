@@ -39,6 +39,13 @@ _LEASED_TABLES: tuple[tuple[str, str, str], ...] = (
     # parse (parse_artifacts' ON CONFLICT DO NOTHING) before retrying the
     # provider call -- no separate resume path is needed.
     ("candidate_jobs", "parsed", "queued"),
+    # Story 7.1 code review (Blind Hunter/Edge Case Hunter/Acceptance
+    # Auditor convergent finding): question_set_jobs carries the identical
+    # AD-6 lease/fencing/reclaim_count columns as candidate_jobs but was
+    # never added here, so a worker crash mid-attempt left the row
+    # permanently `claimed` with no recovery path — a direct AR-15/AR-18
+    # violation ("no persistent claim may become stale").
+    ("question_set_jobs", "claimed", "queued"),
 )
 
 

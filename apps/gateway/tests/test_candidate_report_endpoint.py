@@ -34,6 +34,7 @@ from src.adapters.models import (
     CandidateResult,
     Document,
     JobRequirement,
+    QuestionSetJob,
     RevisionMembership,
     Shortlist,
 )
@@ -57,7 +58,8 @@ def db():
 def _clean_tables(db):
     db.execute(
         text(
-            "TRUNCATE TABLE sessions, users, shortlists, candidate_proposals, candidate_results, "
+            "TRUNCATE TABLE sessions, users, question_set_proposals, question_set_jobs, shortlists, "
+            "candidate_proposals, candidate_results, "
             "candidate_identities, revision_memberships, candidate_jobs, job_requirements, "
             "candidates, documents, analysis_revisions, analysis_sessions CASCADE"
         )
@@ -292,6 +294,7 @@ def test_ranked_report_includes_score_findings_interview_focus_and_shortlist(db)
     assert body["precise_score_percent"] == "85.63"
     assert body["shortlist_state"] == "Shortlisted"
     assert body["shortlist_version"] == 1
+    assert body["question_set_state"] == "NotGenerated"
     assert body["strengths"] == [{"requirement_text": "Kubernetes operations", "state": "Matched"}]
     assert body["gaps"] == [{"requirement_text": "Kafka production operations", "state": "Not Found"}]
     assert body["interview_focus"] == body["gaps"]
@@ -326,6 +329,36 @@ def test_needs_review_report_suppresses_score_and_exposes_gate_codes(db):
     assert body["shortlist_version"] == 1
     assert "headline_whole_percent" not in body
     assert "precise_score_percent" not in body
+    assert "question_set_state" not in body
+
+
+def test_ranked_report_shows_generating_once_a_question_set_job_exists(db):
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    revision_id = _seed_revision(db, session_id, published_at=datetime.now(timezone.utc))
+
+    candidate_id = _seed_candidate(
+        db, revision_id=revision_id, session_id=session_id, document_reference="D3", outcome="NewResult",
+        headline_whole_percent=70, precise_score_percent=Decimal("70.00"),
+    )
+    db.add(
+        QuestionSetJob(
+            id=str(uuid.uuid4()),
+            candidate_id=candidate_id,
+            analysis_revision_id=revision_id,
+            status="queued",
+            idempotency_key="key-1",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/report")
+    client.cookies.clear()
+
+    assert response.status_code == 200
+    assert response.json()["question_set_state"] == "Generating"
 
 
 def test_failed_candidate_has_no_report(db):

@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -41,6 +42,7 @@ from .models import (
     EvidenceReview,
     JobRequirement,
     ParseArtifact,
+    QuestionSetJob,
     RevisionMembership,
     ScoringConfiguration,
     Shortlist,
@@ -737,6 +739,7 @@ def candidate_report(
     identities_table = CandidateIdentity.__table__
     results_table = CandidateResult.__table__
     shortlists_table = Shortlist.__table__
+    question_set_jobs_table = QuestionSetJob.__table__
 
     member_row = (
         db.execute(
@@ -752,6 +755,7 @@ def candidate_report(
                 results_table.c.gate_codes,
                 shortlists_table.c.state.label("shortlist_state"),
                 shortlists_table.c.version.label("shortlist_version"),
+                question_set_jobs_table.c.id.label("question_set_job_id"),
             )
             .select_from(candidates_table)
             .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
@@ -768,6 +772,17 @@ def candidate_report(
             )
             .join(identities_table, identities_table.c.candidate_id == candidates_table.c.id, isouter=True)
             .join(shortlists_table, shortlists_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .join(
+                question_set_jobs_table,
+                # Code review fix (Acceptance Auditor, High): must also
+                # match this revision — question_set_jobs is now
+                # revision-scoped (migration d2e3f4a5b6c7), and an
+                # unfiltered join on candidate_id alone leaked a job
+                # belonging to a *different* revision's report view.
+                (question_set_jobs_table.c.candidate_id == candidates_table.c.id)
+                & (question_set_jobs_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
             .where(candidates_table.c.id == candidate_id)
         )
         .mappings()
@@ -857,6 +872,13 @@ def candidate_report(
                 str(member_row["precise_score_percent"])
                 if member_row["precise_score_percent"] is not None
                 else None
+            )
+            # Story 7.1 (AC#1): only these two states exist yet — a
+            # completed-but-unpublished worker proposal or an exhausted
+            # attempt is not yet inspectable/actionable by a Recruiter
+            # (Story 7.2's scope), so both project as "Generating".
+            report["question_set_state"] = (
+                "Generating" if member_row["question_set_job_id"] is not None else "NotGenerated"
             )
         else:
             report["gate_codes"] = member_row["gate_codes"] or []
@@ -1503,4 +1525,115 @@ def candidate_shortlist(
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         db.rollback()
         print(f"candidate_shortlist: candidate {candidate_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+class QuestionSetRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/candidates/{candidate_id}/question-set")
+def candidate_question_set(
+    candidate_id: str,
+    body: QuestionSetRequest,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> Any:
+    """Story 7.1 (AC#1, AC#3; AR-8, AR-34): idempotently creates or returns
+    the one Interview Question Set generation job for this (Candidate,
+    published Analysis Revision) pair. Only a successful
+    (`NewResult`/`ReusedResult`) Candidate Result is eligible (AR-34's
+    "completed Candidate Result"); `NeedsReview`/`Failed` and any
+    ownership/validation miss collapse into the same neutral 404 (AC#3).
+
+    Code review fix (Acceptance Auditor, High): an earlier version keyed
+    the job on `candidate_id` alone and used a `new_analysis.py::analyze`-
+    style key+fingerprint three-way branch to distinguish "replay" from
+    "conflicting second attempt." That was solving a problem this endpoint
+    doesn't actually have: `question_set_jobs` is now unique on
+    `(candidate_id, analysis_revision_id)` (migration `d2e3f4a5b6c7`), so
+    the natural key already fully identifies the command's target — there
+    is no second, materially-different request `idempotency_key` could ever
+    need to distinguish for the identical (Candidate, revision) pair.
+    "Requested once, duplicated, or refreshed" (AC#1) all collapse to the
+    same answer: does a row for this (candidate_id, revision_id) exist yet?
+    `idempotency_key` is still required and stored (matches this codebase's
+    per-command convention) but no longer drives branching logic."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    revision_id = revision_row["id"]
+
+    memberships_table = RevisionMembership.__table__
+    membership_row = (
+        db.execute(
+            select(memberships_table.c.outcome)
+            .where(memberships_table.c.candidate_id == candidate_id)
+            .where(memberships_table.c.analysis_revision_id == revision_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if membership_row is None or membership_row["outcome"] not in ("NewResult", "ReusedResult"):
+        raise _NOT_FOUND
+
+    jobs_table = QuestionSetJob.__table__
+
+    try:
+        existing = (
+            db.execute(
+                select(jobs_table.c.id)
+                .where(jobs_table.c.candidate_id == candidate_id)
+                .where(jobs_table.c.analysis_revision_id == revision_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is not None:
+            # AC#1: requested once, duplicated, or refreshed all return the
+            # one existing job's current, coarse-grained state (only
+            # NotGenerated/Generating are ever projected in this story —
+            # there is no regenerate control once a job exists for this
+            # revision, by design; Story 7.2 owns retry/publish).
+            return JSONResponse(status_code=202, content={"question_set_state": "Generating"})
+
+        new_id = str(uuid.uuid4())
+        try:
+            db.execute(
+                jobs_table.insert().values(
+                    id=new_id,
+                    candidate_id=candidate_id,
+                    analysis_revision_id=revision_id,
+                    status="queued",
+                    idempotency_key=body.idempotency_key,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+        except IntegrityError:
+            # A concurrent first-request won the unique-(candidate_id,
+            # analysis_revision_id) race — same recovery shape
+            # evidence_review's own first-insert race already established.
+            # `.one_or_none()` (code review fix, not `.one()`): defended,
+            # not expected, against the winner row vanishing between the
+            # failed insert and this re-read — falls through to the neutral
+            # 404 below rather than letting NoResultFound escape as a 500.
+            db.rollback()
+            winner = (
+                db.execute(
+                    select(jobs_table.c.id)
+                    .where(jobs_table.c.candidate_id == candidate_id)
+                    .where(jobs_table.c.analysis_revision_id == revision_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if winner is None:
+                raise _NOT_FOUND
+            return JSONResponse(status_code=202, content={"question_set_state": "Generating"})
+        return JSONResponse(status_code=202, content={"question_set_state": "Generating"})
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        db.rollback()
+        print(f"candidate_question_set: candidate {candidate_id} — {exc}", file=sys.stderr)
         raise _NOT_FOUND
