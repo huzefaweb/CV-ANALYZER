@@ -84,6 +84,13 @@ class Document(Base):
     # the row's own current state, not an insert-race collision backstop
     # (that's what idempotency_key/its unique index are for).
     last_command_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Story 5.3 (AD-12): the one-per-Document retry-in-new-revision allowance.
+    # NULL means unused. Set exactly once, to the id of the Analysis Revision
+    # the retry created; `retry_idempotency_key` is the key that consumed it,
+    # so a genuine replay (same key) is distinguishable from a blocked new
+    # attempt against an already-spent allowance (different key).
+    retried_into_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    retry_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class StartPreparation(Base):
@@ -164,8 +171,9 @@ class Candidate(Base):
 
 
 class AnalysisRevision(Base):
-    """Story 3.5 (AD-5): immutable cohort/publication boundary. This story only ever
-    creates `revision_number=1`; retry-created Revision 2+ is Epic 4+'s scope."""
+    """Story 3.5 (AD-5): immutable cohort/publication boundary. Story 3.5 only ever
+    creates `revision_number=1`; Story 5.3's retry-revision constructor creates
+    `revision_number=2+`."""
 
     __tablename__ = "analysis_revisions"
 

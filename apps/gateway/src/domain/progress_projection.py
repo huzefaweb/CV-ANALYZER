@@ -54,6 +54,7 @@ ROW_STATES = (QUEUED, PARSING, ANALYZING, RECOVERING, RETRYING, NEEDS_REVIEW, SU
 
 _TERMINAL_OUTCOME_TO_STATE = {
     "NewResult": SUCCEEDED,
+    "ReusedResult": SUCCEEDED,
     "NeedsReview": NEEDS_REVIEW,
     "Failed": FAILED,
 }
@@ -84,7 +85,8 @@ def derive_row_state(
             raise ValueError(
                 f"finalized job with non-terminal membership_outcome={membership_outcome!r} — "
                 "Story 4.6's finalizer only ever CASes revision_memberships.outcome to "
-                "NewResult/NeedsReview/Failed in the same transaction it sets status='finalized'"
+                "NewResult/NeedsReview/Failed in the same transaction it sets status='finalized' "
+                "(ReusedResult is Story 5.3's retry-revision carried-forward outcome, also finalized)"
             )
         return state
     if job_status == "failed":

@@ -8,15 +8,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from . import db as db_module
 from .candidate_finalizer import scan_and_finalize_candidates
 from .config import load_settings
-from .db import _SessionLocal, init_engine
+from .db import init_engine
 from .document_upload import router as document_upload_router
 from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
 from .preparation_finalizer import scan_and_finalize
 from .publication_coordinator import scan_and_publish
 from .recovery_sweep import sweep_stale
+from .retry_revision import router as retry_revision_router
 from .workspace import router as workspace_router
 
 # Validated once at process startup (AC#5): a missing secret must fail the
@@ -37,7 +39,7 @@ _FINALIZER_SCAN_INTERVAL_SECONDS = 2
 async def _run_finalizer_loop() -> None:
     while True:
         try:
-            db = _SessionLocal()
+            db = db_module._SessionLocal()
             try:
                 await asyncio.to_thread(scan_and_finalize, db)
             finally:
@@ -61,7 +63,7 @@ _SWEEP_INTERVAL_SECONDS = 2
 async def _run_recovery_sweep_loop() -> None:
     while True:
         try:
-            db = _SessionLocal()
+            db = db_module._SessionLocal()
             try:
                 await asyncio.to_thread(sweep_stale, db)
             finally:
@@ -87,7 +89,7 @@ _CANDIDATE_FINALIZER_SCAN_INTERVAL_SECONDS = 2
 async def _run_candidate_finalizer_loop() -> None:
     while True:
         try:
-            db = _SessionLocal()
+            db = db_module._SessionLocal()
             try:
                 await asyncio.to_thread(scan_and_finalize_candidates, db)
             finally:
@@ -112,7 +114,7 @@ _PUBLICATION_SCAN_INTERVAL_SECONDS = 2
 async def _run_publication_loop() -> None:
     while True:
         try:
-            db = _SessionLocal()
+            db = db_module._SessionLocal()
             try:
                 await asyncio.to_thread(scan_and_publish, db)
             finally:
@@ -153,6 +155,7 @@ app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)
 app.include_router(workspace_router)
 app.include_router(new_analysis_router)
 app.include_router(document_upload_router)
+app.include_router(retry_revision_router)
 
 # AD-21: only the active adapter's routes are mounted. AUTH0_* absent (V1
 # default) selects the local adapter; the Auth0 adapter preflight is

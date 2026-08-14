@@ -19,6 +19,13 @@ def test_finalized_new_result_is_succeeded():
     assert derive_row_state("finalized", 0, None, "NewResult") == SUCCEEDED
 
 
+def test_finalized_reused_result_is_succeeded():
+    # Story 5.3: a retry-revision's carried-forward, previously-ranked
+    # Candidate is written as "ReusedResult", not "NewResult" — it must
+    # display identically to a fresh success.
+    assert derive_row_state("finalized", 0, None, "ReusedResult") == SUCCEEDED
+
+
 def test_finalized_needs_review():
     assert derive_row_state("finalized", 0, None, "NeedsReview") == NEEDS_REVIEW
 
