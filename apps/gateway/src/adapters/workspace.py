@@ -9,17 +9,19 @@ caller, not a reason to write new admission or ownership primitives.
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
+from ..domain.evidence_detail import build_evidence_rows
 from ..domain.evidence_summary import summarize_evidence
 from ..domain.identity import Identity
 from ..domain.notice import RESPONSIBLE_HIRING_NOTICE
 from ..domain.progress_projection import FAILED, NEEDS_REVIEW, SUCCEEDED, derive_row_state
-from ..domain.scoring_configuration import Component
+from ..domain.scoring_configuration import BASE_WEIGHT_BPS, Component
 from .authorization import authorize_owned_row
 from .db import get_db
 from .identity import require_admitted_identity
@@ -33,7 +35,9 @@ from .models import (
     CandidateResult,
     Document,
     JobRequirement,
+    ParseArtifact,
     RevisionMembership,
+    ScoringConfiguration,
     Shortlist,
 )
 
@@ -638,31 +642,21 @@ def session_results(
     }
 
 
-@router.get("/candidates/{candidate_id}/report")
-def candidate_report(
-    candidate_id: str,
-    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
-    identity: Identity = Depends(require_admitted_identity),
-    db: OrmSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Story 6.1 (AR-8, AR-12, AR-21, AR-27-33, AR-46): the authorized,
-    single-Candidate Report projection. Unlike every other endpoint in this
-    module, the route carries no `session_id` (Story 5.2 already shipped the
-    forward-referencing link as `/candidates/{candidate_id}/report`) —
-    ownership is therefore a genuine two-hop independent re-check (AR-8):
-    look up the Candidate's `analysis_session_id`, then prove creator
-    ownership of that session, never trusting that a Candidate row existing
-    implies anything about who owns it. `revision_number` mirrors
-    `session_results`'s identical optional filter (Story 5.4); omitted, it
-    resolves to the highest-numbered published revision for this Candidate's
-    session. Failed membership, a missing/malformed/cross-owner id, or a
-    stale/unpublished revision number all collapse into the same neutral
-    `_NOT_FOUND` (AC#3) — never a distinguishing response. NFR-12: only the
-    fields assembled below ever leave this function — no raw `items_json`,
-    no `candidate_jobs` lease/token fields, no storage paths, no component
-    numerator/denominator pairs (only the already-rounded
-    `precise_score_percent`; the full weight/contribution breakdown is
-    Story 6.2's scope)."""
+def _authorize_candidate_revision(
+    db: OrmSession, identity: Identity, candidate_id: str, revision_number: int | None
+) -> tuple[Mapping[str, Any], Mapping[str, Any], bool]:
+    """Two-hop ownership check (AR-8) shared by `candidate_report` and the
+    Story 6.2 `candidate_evidence`/`candidate_reconciliation` endpoints —
+    extracted once a third caller needed the identical shape, matching this
+    file's own established reuse discipline (`_resolve_published_revision`'s
+    Story 6.1 extraction). Unlike every session-scoped endpoint in this
+    module, the route carries no `session_id`, so ownership is a genuine
+    two-hop independent re-check (AR-8): look up the Candidate's
+    `analysis_session_id`, then prove creator ownership of that session,
+    never trusting that a Candidate row existing implies anything about who
+    owns it. Raises `_NOT_FOUND` on any miss — missing/oversized candidate
+    id, cross-owner session, or a stale/unpublished/nonexistent revision
+    number all collapse into the same neutral outcome (AC#3)."""
     if len(candidate_id) > _MAX_ID_LENGTH:
         raise _NOT_FOUND
 
@@ -690,6 +684,42 @@ def candidate_report(
     )
     if revision_row is None:
         raise _NOT_FOUND
+
+    return candidate_row, revision_row, is_current
+
+
+@router.get("/candidates/{candidate_id}/report")
+def candidate_report(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.1 (AR-8, AR-12, AR-21, AR-27-33, AR-46): the authorized,
+    single-Candidate Report projection. Unlike every other endpoint in this
+    module, the route carries no `session_id` (Story 5.2 already shipped the
+    forward-referencing link as `/candidates/{candidate_id}/report`) —
+    ownership is therefore a genuine two-hop independent re-check (AR-8),
+    performed by the shared `_authorize_candidate_revision` helper (Story
+    6.2 extraction, also used by `candidate_evidence`/`candidate_
+    reconciliation`): look up the Candidate's `analysis_session_id`, then
+    prove creator ownership of that session, never trusting that a
+    Candidate row existing implies anything about who owns it.
+    `revision_number` mirrors `session_results`'s identical optional
+    filter (Story 5.4); omitted, it
+    resolves to the highest-numbered published revision for this Candidate's
+    session. Failed membership, a missing/malformed/cross-owner id, or a
+    stale/unpublished revision number all collapse into the same neutral
+    `_NOT_FOUND` (AC#3) — never a distinguishing response. NFR-12: only the
+    fields assembled below ever leave this function — no raw `items_json`,
+    no `candidate_jobs` lease/token fields, no storage paths, no component
+    numerator/denominator pairs (only the already-rounded
+    `precise_score_percent`; the full weight/contribution breakdown is
+    Story 6.2's scope)."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    candidates_table = Candidate.__table__
 
     revision_id = revision_row["id"]
     documents_table = Document.__table__
@@ -827,4 +857,269 @@ def candidate_report(
         # items_json entry raises TypeError from summarize_evidence's own
         # item.get()/item[...] access, not KeyError/ValueError.
         print(f"candidate_report: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+@router.get("/candidates/{candidate_id}/evidence")
+def candidate_evidence(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.2 (AC#1, AC#3; AR-8, AR-12, AR-21, AR-25): the authorized,
+    full per-Requirement Evidence projection — every Matched/Partial/Needs
+    Validation/Not Found row, with locator/excerpt, never the capped
+    strengths/gaps summary `candidate_report` already renders. Same
+    two-hop ownership shape as `candidate_report` (`_authorize_candidate_
+    revision`); qualifies for the same outcomes (`NewResult`/`ReusedResult`/
+    `NeedsReview` — Failed has no Evidence view either, AC#3). NFR-12: only
+    the fields assembled below ever leave this function — no raw
+    `parse_artifacts.source_units_json` (only the derived locator
+    description per matched item), no full Resume text, no `candidate_jobs`
+    lease fields, no storage paths."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    candidates_table = Candidate.__table__
+    revision_id = revision_row["id"]
+
+    memberships_table = RevisionMembership.__table__
+    results_table = CandidateResult.__table__
+    member_row = (
+        db.execute(
+            select(
+                memberships_table.c.outcome,
+                results_table.c.candidate_job_id,
+            )
+            .select_from(candidates_table)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .where(candidates_table.c.id == candidate_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult", "NeedsReview"):
+        raise _NOT_FOUND
+
+    try:
+        proposals_table = CandidateProposal.__table__
+        items: list[dict] = []
+        if member_row["candidate_job_id"] is not None:
+            proposal_row = (
+                db.execute(
+                    select(proposals_table.c.items_json).where(
+                        proposals_table.c.candidate_job_id == member_row["candidate_job_id"]
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            items = proposal_row["items_json"] if proposal_row is not None else []
+
+        requirements_table = JobRequirement.__table__
+        requirement_rows = (
+            db.execute(
+                select(
+                    requirements_table.c.id,
+                    requirements_table.c.display_id,
+                    requirements_table.c.canonical_text,
+                    requirements_table.c.component,
+                ).where(requirements_table.c.analysis_session_id == candidate_row["analysis_session_id"])
+            )
+            .mappings()
+            .all()
+        )
+        requirement_texts: dict[str, str] = {}
+        requirement_display_ids: dict[str, str] = {}
+        requirement_components: dict[str, Component] = {}
+        for r in requirement_rows:
+            try:
+                requirement_components[r["id"]] = Component(r["component"])
+            except ValueError:
+                print(
+                    f"candidate_evidence: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
+                    file=sys.stderr,
+                )
+                continue
+            requirement_texts[r["id"]] = r["canonical_text"]
+            requirement_display_ids[r["id"]] = r["display_id"]
+
+        parse_table = ParseArtifact.__table__
+        parse_row = (
+            db.execute(
+                select(parse_table.c.source_units_json)
+                .where(parse_table.c.candidate_id == candidate_id)
+                .order_by(parse_table.c.created_at.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        unit_locators: dict[str, dict | None] = {}
+        if parse_row is not None:
+            unit_locators = {unit["id"]: unit["locator"] for unit in parse_row["source_units_json"]}
+
+        # Items referencing a requirement excluded above (unrecognized
+        # Component) are dropped rather than crashing the whole endpoint —
+        # same skip-and-log defense applied one step further.
+        items = [item for item in items if str(item["job_requirement_id"]) in requirement_texts]
+
+        rows = build_evidence_rows(items, requirement_texts, requirement_display_ids, requirement_components, unit_locators)
+
+        return {
+            "candidate_id": candidate_id,
+            "revision_number": revision_row["revision_number"],
+            "is_current": is_current,
+            "rows": [
+                {
+                    "requirement_display_id": row.requirement_display_id,
+                    "requirement_text": row.requirement_text,
+                    "state": row.state,
+                    "locator_description": row.locator_description,
+                    "excerpt": row.excerpt,
+                    "recruiter_review": "NoReviewFlag",
+                }
+                for row in rows
+            ],
+        }
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        # AttributeError included (review finding): a non-Mapping locator
+        # value in malformed source_units_json raises AttributeError from
+        # _describe_locator's own .get() access, not KeyError/TypeError —
+        # must still collapse to the neutral 404, not a 500.
+        print(f"candidate_evidence: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+@router.get("/candidates/{candidate_id}/reconciliation")
+def candidate_reconciliation(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.2 (AC#2; AR-8, AR-12, AR-21, AR-27-29): the authorized
+    per-component score-reconciliation projection — base/effective weights,
+    N/A redistribution, and the already-exact, already-largest-remainder-
+    reconciled `component_contribution_display` (Story 4.5/4.6), reshaped
+    per component. Only `NewResult`/`ReusedResult` qualify — Needs Review
+    has no score to reconcile (AC#2's own "scoreable Candidate"
+    precondition); anything else collapses into the same neutral
+    `_NOT_FOUND` as every other malformed case in this module. No scoring
+    is recomputed here — every value is already exact and persisted."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    candidates_table = Candidate.__table__
+    revision_id = revision_row["id"]
+
+    memberships_table = RevisionMembership.__table__
+    results_table = CandidateResult.__table__
+    member_row = (
+        db.execute(
+            select(
+                memberships_table.c.outcome,
+                results_table.c.component_contribution_display,
+                results_table.c.precise_score_percent,
+                results_table.c.headline_whole_percent,
+            )
+            .select_from(candidates_table)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .where(candidates_table.c.id == candidate_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult"):
+        raise _NOT_FOUND
+
+    try:
+        contribution_display = member_row["component_contribution_display"]
+        if contribution_display is None:
+            raise ValueError("scoreable membership has no component_contribution_display")
+
+        scoring_table = ScoringConfiguration.__table__
+        scoring_rows = (
+            db.execute(
+                select(scoring_table.c.component, scoring_table.c.applicable, scoring_table.c.effective_weight_bps)
+                .where(scoring_table.c.analysis_session_id == candidate_row["analysis_session_id"])
+            )
+            .mappings()
+            .all()
+        )
+        by_component: dict[Component, Mapping[str, Any]] = {}
+        for r in scoring_rows:
+            try:
+                by_component[Component(r["component"])] = r
+            except ValueError:
+                print(
+                    f"candidate_reconciliation: scoring_configurations has unrecognized component {r['component']!r} — excluded",
+                    file=sys.stderr,
+                )
+                continue
+
+        components: list[dict[str, Any]] = []
+        for component in Component:
+            row = by_component.get(component)
+            applicable = bool(row["applicable"]) if row is not None else False
+            effective_weight_percent = (
+                str((Decimal(row["effective_weight_bps"]) / Decimal(100)).quantize(Decimal("0.01")))
+                if applicable and row is not None
+                else None
+            )
+            contribution = contribution_display.get(component.value) if applicable else None
+            components.append(
+                {
+                    "component": component.value,
+                    "base_weight_percent": str(
+                        (Decimal(BASE_WEIGHT_BPS[component]) / Decimal(100)).quantize(Decimal("0.01"))
+                    ),
+                    "applicable": applicable,
+                    "effective_weight_percent": effective_weight_percent,
+                    "contribution_percent": str(contribution) if contribution is not None else None,
+                }
+            )
+
+        return {
+            "candidate_id": candidate_id,
+            "revision_number": revision_row["revision_number"],
+            "is_current": is_current,
+            "components": components,
+            # None-guard (review finding): a scoreable membership always
+            # persists precise_score_percent alongside component_
+            # contribution_display, but str(None) == "None" is a real,
+            # silently-wrong wire value if that trust boundary is ever
+            # violated — mirrors candidate_report's identical guard.
+            "precise_score_percent": (
+                str(member_row["precise_score_percent"]) if member_row["precise_score_percent"] is not None else None
+            ),
+            "headline_whole_percent": member_row["headline_whole_percent"],
+        }
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        # AttributeError included (review finding): a non-dict persisted
+        # component_contribution_display raises AttributeError from its
+        # own .get() access, not KeyError/TypeError — must still collapse
+        # to the neutral 404, not a 500.
+        print(f"candidate_reconciliation: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
         raise _NOT_FOUND

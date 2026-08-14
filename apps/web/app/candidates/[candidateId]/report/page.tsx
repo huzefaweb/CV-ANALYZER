@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import { gateCodeMessage } from "@/lib/gateCodeMessages";
+import { componentLabel } from "@/lib/componentLabels";
 import {
   type EvidencePoint,
   gapText,
@@ -39,6 +40,53 @@ type NeedsReviewReport = Omit<RankedReport, "outcome" | "headline_whole_percent"
 
 type CandidateReport = RankedReport | NeedsReviewReport;
 
+type EvidenceRow = {
+  requirement_display_id: string;
+  requirement_text: string;
+  state: string;
+  locator_description: string | null;
+  excerpt: string;
+  recruiter_review: string;
+};
+
+type EvidenceProjection = {
+  candidate_id: string;
+  revision_number: number;
+  is_current: boolean;
+  rows: EvidenceRow[];
+};
+
+type ReconciliationComponent = {
+  component: string;
+  base_weight_percent: string;
+  applicable: boolean;
+  effective_weight_percent: string | null;
+  contribution_percent: string | null;
+};
+
+type ReconciliationProjection = {
+  candidate_id: string;
+  revision_number: number;
+  is_current: boolean;
+  components: ReconciliationComponent[];
+  precise_score_percent: string | null;
+  headline_whole_percent: number;
+};
+
+// Extracted once a second caller needed the identical sentence (review
+// finding: it had been hand-duplicated verbatim in the reconciliation
+// section below) — reused by both the outcome summary and the
+// reconciliation table.
+function PreciseValueNotice({ value }: { value: string | null }) {
+  if (value === null) return null;
+  return (
+    <p>
+      Precise calculation value: {value}%. Used for deterministic ordering and reconciliation. It is not a
+      confidence level, probability, or measure of hiring suitability.
+    </p>
+  );
+}
+
 // AD-3/UX-DR9: missing, malformed, Failed, stale, and cross-owner ids all
 // render the same neutral "Authorization denied" copy — the identical
 // markup workspace/sessions/[id]/results/page.tsx already established.
@@ -68,9 +116,11 @@ export default async function CandidateReportPage({
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) redirect("/login");
 
-  const reportPath = revisionNumber
-    ? `/workspace/candidates/${encodeURIComponent(candidateId)}/report?revision_number=${revisionNumber}`
-    : `/workspace/candidates/${encodeURIComponent(candidateId)}/report`;
+  const encodedId = encodeURIComponent(candidateId);
+  const revisionQuery = revisionNumber ? `?revision_number=${revisionNumber}` : "";
+  const reportPath = `/workspace/candidates/${encodedId}/report${revisionQuery}`;
+  const evidencePath = `/workspace/candidates/${encodedId}/evidence${revisionQuery}`;
+  const reconciliationPath = `/workspace/candidates/${encodedId}/reconciliation${revisionQuery}`;
 
   const response = await gatewayFetch(reportPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } });
 
@@ -85,6 +135,22 @@ export default async function CandidateReportPage({
   const publishedDate = new Date(data.published_at).toLocaleString();
   const createdDate = new Date(data.revision_created_at).toLocaleString();
   const referenceSuffix = identityReferenceSuffix(data.display_name, data.document_reference);
+
+  // Evidence exists for both Ranked and Needs Review (Task 2's endpoint
+  // qualifies both outcomes), so it is always fetched. Task 3's
+  // reconciliation endpoint only serves scoreable (Ranked) Candidates —
+  // a Needs Review Candidate's page never calls it (the endpoint's own
+  // Needs-Review-404 branch is defensive-only from here).
+  const [evidenceResponse, reconciliationResponse] = await Promise.all([
+    gatewayFetch(evidencePath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } }),
+    data.outcome === "Ranked"
+      ? gatewayFetch(reconciliationPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } })
+      : Promise.resolve(null),
+  ]);
+
+  const evidence: EvidenceProjection | null = evidenceResponse.ok ? await evidenceResponse.json() : null;
+  const reconciliation: ReconciliationProjection | null =
+    reconciliationResponse && reconciliationResponse.ok ? await reconciliationResponse.json() : null;
 
   return (
     <main id="main">
@@ -108,12 +174,7 @@ export default async function CandidateReportPage({
         {data.outcome === "Ranked" ? (
           <>
             <p>{data.headline_whole_percent}%</p>
-            {data.precise_score_percent !== null ? (
-              <p>
-                Precise calculation value: {data.precise_score_percent}%. Used for deterministic ordering and
-                reconciliation. It is not a confidence level, probability, or measure of hiring suitability.
-              </p>
-            ) : null}
+            <PreciseValueNotice value={data.precise_score_percent} />
           </>
         ) : (
           <>
@@ -158,6 +219,31 @@ export default async function CandidateReportPage({
       </section>
 
       <section className="panel">
+        <h2>Evidence</h2>
+        {evidence === null || evidence.rows.length === 0 ? (
+          <p>No Evidence rows recorded for this Candidate.</p>
+        ) : (
+          evidence.rows.map((row, i) => (
+            <details key={i}>
+              <summary>
+                {row.requirement_display_id} · {row.requirement_text} · {row.state}
+              </summary>
+              <p>Analysis state: {row.state}</p>
+              <p>Recruiter review: {row.recruiter_review === "NoReviewFlag" ? "No review flag" : row.recruiter_review}</p>
+              {row.state === "Not Found" ? (
+                <p>No supporting Evidence was located. This is not proof the Candidate lacks the qualification.</p>
+              ) : (
+                <>
+                  <p>{row.locator_description ?? "No source location recorded."}</p>
+                  <p>{row.excerpt || "No excerpt recorded."}</p>
+                </>
+              )}
+            </details>
+          ))
+        )}
+      </section>
+
+      <section className="panel">
         <h2>Interview focus</h2>
         {data.interview_focus.length === 0 ? (
           <p>No validation topics for this Candidate.</p>
@@ -169,6 +255,39 @@ export default async function CandidateReportPage({
           </ul>
         )}
       </section>
+
+      {reconciliation !== null ? (
+        <section className="panel">
+          <h2>Score reconciliation</h2>
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Base weight</th>
+                  <th>Effective weight</th>
+                  <th>Contribution</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reconciliation.components.map((c) => (
+                  <tr key={c.component}>
+                    <td>{componentLabel(c.component)}</td>
+                    <td>{c.base_weight_percent}%</td>
+                    <td>{c.effective_weight_percent !== null ? `${c.effective_weight_percent}%` : "N/A"}</td>
+                    <td>{c.contribution_percent !== null ? `${c.contribution_percent}%` : "N/A"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <PreciseValueNotice value={reconciliation.precise_score_percent} />
+          <p>
+            Effective weights total 10,000 basis points; largest-remainder handling assigns any integer remainder in
+            frozen component order.
+          </p>
+        </section>
+      ) : null}
 
       <p>{shortlistLabel(data.shortlist_state)}</p>
       <p>No Disputed conclusions in this revision.</p>
