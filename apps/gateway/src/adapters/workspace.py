@@ -360,6 +360,58 @@ def _candidate_display_name(display_name: str | None, document_reference: str) -
     return display_name if display_name else document_reference
 
 
+def _resolve_published_revision(
+    db: OrmSession, session_id: str, revision_number: int | None
+) -> tuple[Mapping[str, Any] | None, bool]:
+    """Shared by `session_results` and `candidate_report` (Story 6.1 review
+    finding: this ~35-line shape was duplicated verbatim between the two —
+    factored out once a second caller needed it, matching this file's own
+    established reuse discipline). `None` `revision_number` resolves to the
+    highest-numbered published revision (`is_current` trivially `True` by
+    definition — no second query needed to prove it, Story 5.2 review
+    finding). A given `revision_number` is looked up scoped to `session_id`
+    and `published_at IS NOT NULL`; a miss returns `(None, False)`,
+    collapsing "doesn't exist," "exists but unpublished," and "belongs to
+    another session" into one outcome so a tampered value cannot be used to
+    probe revision existence (Story 5.3's neutral-response principle)."""
+    revision_table = AnalysisRevision.__table__
+    if revision_number is None:
+        revision_row = (
+            db.execute(
+                select(revision_table)
+                .where(revision_table.c.analysis_session_id == session_id)
+                .where(revision_table.c.published_at.is_not(None))
+                .order_by(revision_table.c.revision_number.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return revision_row, revision_row is not None
+
+    revision_row = (
+        db.execute(
+            select(revision_table)
+            .where(revision_table.c.analysis_session_id == session_id)
+            .where(revision_table.c.revision_number == revision_number)
+            .where(revision_table.c.published_at.is_not(None))
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if revision_row is None:
+        return None, False
+    current_published_number = db.execute(
+        select(revision_table.c.revision_number)
+        .where(revision_table.c.analysis_session_id == session_id)
+        .where(revision_table.c.published_at.is_not(None))
+        .order_by(revision_table.c.revision_number.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return revision_row, revision_row["revision_number"] == current_published_number
+
+
 @router.get("/sessions/{session_id}/results")
 def session_results(
     session_id: str,
@@ -399,46 +451,7 @@ def session_results(
     if row is None or row["creator_issuer"] != identity.issuer:
         raise _NOT_FOUND
 
-    revision_table = AnalysisRevision.__table__
-
-    if revision_number is None:
-        # The highest-numbered published revision IS "current" by
-        # definition — no second query needed to prove it (review finding:
-        # the prior version ran a redundant, non-snapshotted second query
-        # here even in this default path).
-        revision_row = (
-            db.execute(
-                select(revision_table)
-                .where(revision_table.c.analysis_session_id == session_id)
-                .where(revision_table.c.published_at.is_not(None))
-                .order_by(revision_table.c.revision_number.desc())
-                .limit(1)
-            )
-            .mappings()
-            .one_or_none()
-        )
-        is_current = revision_row is not None
-    else:
-        revision_row = (
-            db.execute(
-                select(revision_table)
-                .where(revision_table.c.analysis_session_id == session_id)
-                .where(revision_table.c.revision_number == revision_number)
-                .where(revision_table.c.published_at.is_not(None))
-                .limit(1)
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if revision_row is not None:
-            current_published_number = db.execute(
-                select(revision_table.c.revision_number)
-                .where(revision_table.c.analysis_session_id == session_id)
-                .where(revision_table.c.published_at.is_not(None))
-                .order_by(revision_table.c.revision_number.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-            is_current = revision_row["revision_number"] == current_published_number
+    revision_row, is_current = _resolve_published_revision(db, session_id, revision_number)
     if revision_row is None:
         return _not_yet_published_results()
 
@@ -623,3 +636,195 @@ def session_results(
         "failed": failed,
         "notice": dict(RESPONSIBLE_HIRING_NOTICE),
     }
+
+
+@router.get("/candidates/{candidate_id}/report")
+def candidate_report(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 6.1 (AR-8, AR-12, AR-21, AR-27-33, AR-46): the authorized,
+    single-Candidate Report projection. Unlike every other endpoint in this
+    module, the route carries no `session_id` (Story 5.2 already shipped the
+    forward-referencing link as `/candidates/{candidate_id}/report`) —
+    ownership is therefore a genuine two-hop independent re-check (AR-8):
+    look up the Candidate's `analysis_session_id`, then prove creator
+    ownership of that session, never trusting that a Candidate row existing
+    implies anything about who owns it. `revision_number` mirrors
+    `session_results`'s identical optional filter (Story 5.4); omitted, it
+    resolves to the highest-numbered published revision for this Candidate's
+    session. Failed membership, a missing/malformed/cross-owner id, or a
+    stale/unpublished revision number all collapse into the same neutral
+    `_NOT_FOUND` (AC#3) — never a distinguishing response. NFR-12: only the
+    fields assembled below ever leave this function — no raw `items_json`,
+    no `candidate_jobs` lease/token fields, no storage paths, no component
+    numerator/denominator pairs (only the already-rounded
+    `precise_score_percent`; the full weight/contribution breakdown is
+    Story 6.2's scope)."""
+    if len(candidate_id) > _MAX_ID_LENGTH:
+        raise _NOT_FOUND
+
+    candidates_table = Candidate.__table__
+    candidate_row = (
+        db.execute(select(candidates_table).where(candidates_table.c.id == candidate_id)).mappings().one_or_none()
+    )
+    if candidate_row is None:
+        raise _NOT_FOUND
+
+    session_table = AnalysisSession.__table__
+    session_row = authorize_owned_row(
+        db,
+        identity,
+        session_table,
+        session_table.c.id,
+        session_table.c.creator_subject,
+        candidate_row["analysis_session_id"],
+    )
+    if session_row is None or session_row["creator_issuer"] != identity.issuer:
+        raise _NOT_FOUND
+
+    revision_row, is_current = _resolve_published_revision(
+        db, candidate_row["analysis_session_id"], revision_number
+    )
+    if revision_row is None:
+        raise _NOT_FOUND
+
+    revision_id = revision_row["id"]
+    documents_table = Document.__table__
+    memberships_table = RevisionMembership.__table__
+    identities_table = CandidateIdentity.__table__
+    results_table = CandidateResult.__table__
+    shortlists_table = Shortlist.__table__
+
+    member_row = (
+        db.execute(
+            select(
+                candidates_table.c.document_reference,
+                documents_table.c.original_filename,
+                memberships_table.c.outcome,
+                identities_table.c.display_name,
+                results_table.c.id.label("result_id"),
+                results_table.c.candidate_job_id,
+                results_table.c.headline_whole_percent,
+                results_table.c.precise_score_percent,
+                results_table.c.gate_codes,
+                shortlists_table.c.state.label("shortlist_state"),
+            )
+            .select_from(candidates_table)
+            .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .join(identities_table, identities_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .join(shortlists_table, shortlists_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .where(candidates_table.c.id == candidate_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    # Failed membership has no Candidate Report (AC#3); a missing row or any
+    # non-terminal/unreachable outcome collapses into the same neutral 404.
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult", "NeedsReview"):
+        raise _NOT_FOUND
+
+    try:
+        display_name = _candidate_display_name(member_row["display_name"], member_row["document_reference"])
+        shortlist_state = member_row["shortlist_state"] or "NotShortlisted"
+        outcome = member_row["outcome"]
+
+        requirements_table = JobRequirement.__table__
+        requirement_rows = (
+            db.execute(
+                select(
+                    requirements_table.c.id, requirements_table.c.canonical_text, requirements_table.c.component
+                ).where(requirements_table.c.analysis_session_id == candidate_row["analysis_session_id"])
+            )
+            .mappings()
+            .all()
+        )
+        requirement_texts: dict[str, str] = {}
+        requirement_components: dict[str, Component] = {}
+        for r in requirement_rows:
+            try:
+                requirement_components[r["id"]] = Component(r["component"])
+            except ValueError:
+                print(
+                    f"candidate_report: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
+                    file=sys.stderr,
+                )
+                continue
+            requirement_texts[r["id"]] = r["canonical_text"]
+
+        proposals_table = CandidateProposal.__table__
+        items: list[dict] = []
+        if member_row["candidate_job_id"] is not None:
+            proposal_row = (
+                db.execute(
+                    select(proposals_table.c.items_json).where(
+                        proposals_table.c.candidate_job_id == member_row["candidate_job_id"]
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            items = proposal_row["items_json"] if proposal_row is not None else []
+
+        # Reused unchanged from Story 5.2 — same capped strengths/gaps
+        # selection. `interview_focus` intentionally reuses `gaps` rather
+        # than a second selection function (see story Dev Notes).
+        summary = summarize_evidence(items, requirement_texts, requirement_components)
+        strengths = [{"requirement_text": p.requirement_text, "state": p.state} for p in summary.strengths]
+        gaps = [{"requirement_text": p.requirement_text, "state": p.state} for p in summary.gaps]
+
+        report: dict[str, Any] = {
+            "analysis_session_id": candidate_row["analysis_session_id"],
+            "candidate_id": candidate_id,
+            "document_reference": member_row["document_reference"],
+            "original_filename": member_row["original_filename"],
+            "display_name": display_name,
+            "outcome": "Ranked" if outcome in ("NewResult", "ReusedResult") else "NeedsReview",
+            "revision_number": revision_row["revision_number"],
+            "revision_created_at": revision_row["created_at"].isoformat(),
+            "published_at": revision_row["published_at"].isoformat(),
+            "is_current": is_current,
+            "shortlist_state": shortlist_state,
+            "strengths": strengths,
+            "gaps": gaps,
+            "interview_focus": gaps,
+            "notice": dict(RESPONSIBLE_HIRING_NOTICE),
+        }
+
+        if outcome in ("NewResult", "ReusedResult"):
+            if member_row["result_id"] is None:
+                raise ValueError("ranked membership has no matching candidate_results row")
+            # AC#2: score/reconciliation fields never appear at all for
+            # Needs Review — omit the keys entirely, not merely null.
+            report["headline_whole_percent"] = member_row["headline_whole_percent"]
+            report["precise_score_percent"] = (
+                str(member_row["precise_score_percent"])
+                if member_row["precise_score_percent"] is not None
+                else None
+            )
+        else:
+            report["gate_codes"] = member_row["gate_codes"] or []
+
+        return report
+    except (KeyError, ValueError, TypeError) as exc:
+        # A single-candidate endpoint has no "skip this row, keep the rest"
+        # option the way session_results does — an anomalous row here is a
+        # neutral unavailable outcome, same as any other malformed case.
+        # TypeError included (review finding): a malformed, non-Mapping
+        # items_json entry raises TypeError from summarize_evidence's own
+        # item.get()/item[...] access, not KeyError/ValueError.
+        print(f"candidate_report: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND

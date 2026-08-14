@@ -2,12 +2,17 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import { gateCodeMessage } from "@/lib/gateCodeMessages";
+import {
+  type EvidencePoint,
+  gapText,
+  identityReferenceSuffix,
+  parseRevisionParam,
+  shortlistLabel,
+} from "@/lib/resultsFormatting";
 import RevisionSelector, { type RevisionOption } from "./RevisionSelector";
 import RetryButton from "./RetryButton";
 
 export const dynamic = "force-dynamic";
-
-type EvidencePoint = { requirement_text: string; state: string };
 
 type RankedRow = {
   candidate_id: string;
@@ -67,16 +72,6 @@ type ResultsProjection =
       notice: Notice;
     };
 
-function shortlistLabel(state: string): string {
-  return state === "Shortlisted" ? "Shortlisted" : "Not shortlisted";
-}
-
-function gapText(point: EvidencePoint): string {
-  return point.state === "Needs Validation"
-    ? `Needs Validation: ${point.requirement_text}`
-    : `Evidence not found for ${point.requirement_text}`;
-}
-
 // AD-3/UX-DR9: missing, malformed, and cross-owner ids all render the same
 // neutral "Authorization denied" copy — the identical markup
 // workspace/sessions/[id]/page.tsx already established.
@@ -90,20 +85,6 @@ function AuthorizationDenied() {
       </p>
     </main>
   );
-}
-
-// Defensive parse (Story 5.4): a malformed `?revision=` never reaches the
-// gateway query string — treated as absent, falling back to the current
-// published revision, rather than forwarding garbage for the gateway to
-// reject.
-function parseRevisionParam(raw: string | string[] | undefined): number | undefined {
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  // Review finding: Number.parseInt is lenient about trailing garbage
-  // ("1abc" -> 1, "1.9" -> 1) — require the whole string to be digits
-  // before parsing, so malformed input is genuinely treated as absent.
-  if (value === undefined || !/^[0-9]+$/.test(value)) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return parsed > 0 ? parsed : undefined;
 }
 
 export default async function ResultsPage({
@@ -205,7 +186,9 @@ export default async function ResultsPage({
               <li key={row.candidate_id} value={row.rank_position}>
                 <p>
                   <b>{row.display_name}</b>
-                  {row.display_name !== row.document_reference ? <> — {row.document_reference}</> : null} ·{" "}
+                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                  ) : null} ·{" "}
                   {row.original_filename}
                 </p>
                 <p>{row.headline_whole_percent}%</p>
@@ -231,7 +214,9 @@ export default async function ResultsPage({
                 ) : null}
                 <p>{shortlistLabel(row.shortlist_state)}</p>
                 <p>
-                  <a href={`/candidates/${row.candidate_id}/report`}>View Candidate Report</a>
+                  <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
+                    View Candidate Report
+                  </a>
                 </p>
               </li>
             ))}
@@ -252,7 +237,9 @@ export default async function ResultsPage({
                 </p>
                 <p>
                   <b>{row.display_name}</b>
-                  {row.display_name !== row.document_reference ? <> — {row.document_reference}</> : null} ·{" "}
+                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                  ) : null} ·{" "}
                   {row.original_filename}
                 </p>
                 <ul>
@@ -261,6 +248,11 @@ export default async function ResultsPage({
                   ))}
                 </ul>
                 <p>{shortlistLabel(row.shortlist_state)}</p>
+                <p>
+                  <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
+                    View Candidate Report
+                  </a>
+                </p>
               </li>
             ))}
           </ul>
@@ -280,7 +272,9 @@ export default async function ResultsPage({
                 </p>
                 <p>
                   <b>{row.display_name}</b>
-                  {row.display_name !== row.document_reference ? <> — {row.document_reference}</> : null} ·{" "}
+                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                  ) : null} ·{" "}
                   {row.original_filename}
                 </p>
                 <p>{row.failure_category}</p>

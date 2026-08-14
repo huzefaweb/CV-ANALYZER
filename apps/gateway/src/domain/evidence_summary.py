@@ -10,7 +10,7 @@ analysis_provider.ProposalItem`: `job_requirement_id`/`state`/`locator`/
 `excerpt`). This module selects a small, deterministic, display-ready subset
 of that data for one Candidate's Ranked Results row — it does not touch the
 raw excerpt (too long for a compact row; full Evidence inspection is
-Candidate Report's future scope, Story 6.1) and it never fabricates content
+Candidate Report's future scope, Story 6.2) and it never fabricates content
 for a Job Requirement with no corresponding proposal item.
 """
 
