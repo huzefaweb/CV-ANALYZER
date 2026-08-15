@@ -192,7 +192,7 @@ export default async function CandidateReportPage({
         sessionId={data.analysis_session_id}
         revisions={revisions}
         activeRevisionNumber={data.revision_number}
-        hrefForPublished={(revision) => `/candidates/${data.candidate_id}/report?revision=${revision.revision_number}`}
+        publishedBasePath={`/candidates/${data.candidate_id}/report`}
       />
 
       <p className="meta">

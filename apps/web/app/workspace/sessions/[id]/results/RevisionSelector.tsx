@@ -10,15 +10,20 @@ export default function RevisionSelector({
   sessionId,
   revisions,
   activeRevisionNumber,
-  hrefForPublished,
+  publishedBasePath,
 }: {
   sessionId: string;
   revisions: RevisionOption[];
   activeRevisionNumber: number | null;
   // Candidate Report reuses this same selector but must stay on the
-  // Candidate's own report at the chosen revision, not jump to Results —
-  // defaults to the original Results-page destination unchanged.
-  hrefForPublished?: (revision: RevisionOption) => string;
+  // Candidate's own report at the chosen revision, not jump to Results.
+  // A plain string, not a callback — a Server Component (Candidate
+  // Report's page.tsx) can't pass a function prop across the Client
+  // Component boundary to this component (confirmed live: Next.js threw
+  // "Functions cannot be passed directly to Client Components" the one
+  // time this carried a closure instead). Defaults to the original
+  // Results-page destination unchanged.
+  publishedBasePath?: string;
 }) {
   const router = useRouter();
 
@@ -31,7 +36,8 @@ export default function RevisionSelector({
     const selected = revisions.find((r) => String(r.revision_number) === event.target.value);
     if (!selected) return;
     if (selected.published) {
-      router.push(hrefForPublished ? hrefForPublished(selected) : `/workspace/sessions/${sessionId}/results?revision=${selected.revision_number}`);
+      const basePath = publishedBasePath ?? `/workspace/sessions/${sessionId}/results`;
+      router.push(`${basePath}?revision=${selected.revision_number}`);
     } else {
       router.push(`/workspace/sessions/${sessionId}`);
     }
