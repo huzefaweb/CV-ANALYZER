@@ -294,6 +294,12 @@ export default async function CandidateReportPage({
       ) : null}
 
       <p>
+        <a href={`/candidates/${data.candidate_id}/print-prepare?revision=${data.revision_number}`}>
+          Prepare to print
+        </a>
+      </p>
+
+      <p>
         <a href={`/workspace/sessions/${data.analysis_session_id}/results?revision=${data.revision_number}`}>
           Back to Results
         </a>

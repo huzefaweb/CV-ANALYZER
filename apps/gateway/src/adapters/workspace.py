@@ -25,6 +25,7 @@ from ..domain.evidence_detail import build_evidence_rows
 from ..domain.evidence_summary import summarize_evidence
 from ..domain.identity import Identity
 from ..domain.notice import RESPONSIBLE_HIRING_NOTICE
+from ..domain.print_projection import SCORED_COMBINED, derive_print_scope, derive_trigger, is_print_blocked
 from ..domain.progress_projection import FAILED, NEEDS_REVIEW, SUCCEEDED, derive_row_state
 from ..domain.question_set_projection import derive_question_set_state
 from ..domain.scoring_configuration import BASE_WEIGHT_BPS, Component
@@ -45,6 +46,7 @@ from .models import (
     ParseArtifact,
     QuestionSetJob,
     QuestionSetProposal,
+    QuestionSetVersion,
     RevisionMembership,
     ScoringConfiguration,
     Shortlist,
@@ -1197,6 +1199,433 @@ def candidate_reconciliation(
         # own .get() access, not KeyError/TypeError — must still collapse
         # to the neutral 404, not a 500.
         print(f"candidate_reconciliation: candidate {candidate_id} in revision {revision_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+def _load_report_member_row(db: OrmSession, candidate_id: str, revision_id: str) -> Mapping[str, Any] | None:
+    """The same per-Candidate report row `candidate_report`'s own query
+    builds (Story 7.3 copies this query block rather than calling that
+    endpoint over HTTP — the query itself is internal, no shared helper
+    existed for it before this story), plus `component_contribution_display`,
+    which `candidate_report` itself never needed but `candidate_print`'s
+    reconciliation branch does."""
+    candidates_table = Candidate.__table__
+    documents_table = Document.__table__
+    memberships_table = RevisionMembership.__table__
+    identities_table = CandidateIdentity.__table__
+    results_table = CandidateResult.__table__
+    question_set_jobs_table = QuestionSetJob.__table__
+    return (
+        db.execute(
+            select(
+                candidates_table.c.document_reference,
+                documents_table.c.original_filename,
+                memberships_table.c.outcome,
+                identities_table.c.display_name,
+                results_table.c.id.label("result_id"),
+                results_table.c.candidate_job_id,
+                results_table.c.headline_whole_percent,
+                results_table.c.precise_score_percent,
+                results_table.c.component_contribution_display,
+                results_table.c.gate_codes,
+                question_set_jobs_table.c.status.label("question_set_job_status"),
+                question_set_jobs_table.c.reclaim_count.label("question_set_reclaim_count"),
+                question_set_jobs_table.c.failure_reason.label("question_set_failure_reason"),
+            )
+            .select_from(candidates_table)
+            .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
+            .join(
+                memberships_table,
+                (memberships_table.c.candidate_id == candidates_table.c.id)
+                & (memberships_table.c.analysis_revision_id == revision_id),
+            )
+            .join(
+                results_table,
+                (results_table.c.candidate_id == candidates_table.c.id)
+                & (results_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .join(identities_table, identities_table.c.candidate_id == candidates_table.c.id, isouter=True)
+            .join(
+                question_set_jobs_table,
+                (question_set_jobs_table.c.candidate_id == candidates_table.c.id)
+                & (question_set_jobs_table.c.analysis_revision_id == revision_id),
+                isouter=True,
+            )
+            .where(candidates_table.c.id == candidate_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+
+
+def _build_print_metadata(
+    db: OrmSession,
+    candidate_row: Mapping[str, Any],
+    revision_row: Mapping[str, Any],
+    member_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Shared by both print endpoints (Task 2): the confirmation-screen
+    fields, computed once per request. Caller has already verified
+    `member_row["outcome"]` is one of the three qualifying values."""
+    display_name = _candidate_display_name(member_row["display_name"], member_row["document_reference"])
+    outcome = "Ranked" if member_row["outcome"] in ("NewResult", "ReusedResult") else "NeedsReview"
+    scope = derive_print_scope(outcome)
+
+    question_set_state = ""
+    if outcome == "Ranked":
+        question_set_state = derive_question_set_state(
+            member_row["question_set_job_status"],
+            member_row["question_set_reclaim_count"] or 0,
+            member_row["question_set_failure_reason"],
+        )
+    blocked = is_print_blocked(outcome, question_set_state)
+
+    revision_number = revision_row["revision_number"]
+    retried_document_reference: str | None = None
+    if revision_number > 1:
+        documents_table = Document.__table__
+        # Code review fix (Edge Case Hunter/Blind Hunter, convergent): no DB
+        # constraint enforces at most one Document per
+        # retried_into_revision_id — `.limit(1)` (not `.one_or_none()`) means
+        # a data-integrity violation of that business invariant degrades to
+        # "some" trigger text instead of an uncaught MultipleResultsFound
+        # 500, matching this module's "must never crash on a data-integrity
+        # edge case" print-projection discipline.
+        retried_row = (
+            db.execute(
+                select(documents_table.c.document_reference)
+                .where(documents_table.c.retried_into_revision_id == revision_row["id"])
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        retried_document_reference = retried_row["document_reference"] if retried_row is not None else None
+    trigger = derive_trigger(revision_number, retried_document_reference)
+
+    metadata: dict[str, Any] = {
+        "candidate_id": candidate_row["id"],
+        "document_reference": member_row["document_reference"],
+        "original_filename": member_row["original_filename"],
+        "display_name": display_name,
+        "outcome": outcome,
+        "scope": scope,
+        "revision_number": revision_number,
+        "revision_created_at": revision_row["created_at"].isoformat(),
+        "published_at": revision_row["published_at"].isoformat(),
+        "trigger": trigger,
+        "blocked": blocked,
+    }
+    if blocked:
+        metadata["blocked_reason"] = "question_set_incomplete"
+    return metadata
+
+
+def _load_requirement_maps(
+    db: OrmSession, analysis_session_id: str
+) -> tuple[dict[str, str], dict[str, str], dict[str, Component]]:
+    """`requirement_texts`, `requirement_display_ids`, `requirement_components`
+    — the exact triple `candidate_evidence` already builds inline (copied,
+    not imported: no shared query helper existed for it before this
+    story)."""
+    requirements_table = JobRequirement.__table__
+    requirement_rows = (
+        db.execute(
+            select(
+                requirements_table.c.id,
+                requirements_table.c.display_id,
+                requirements_table.c.canonical_text,
+                requirements_table.c.component,
+            ).where(requirements_table.c.analysis_session_id == analysis_session_id)
+        )
+        .mappings()
+        .all()
+    )
+    requirement_texts: dict[str, str] = {}
+    requirement_display_ids: dict[str, str] = {}
+    requirement_components: dict[str, Component] = {}
+    for r in requirement_rows:
+        try:
+            requirement_components[r["id"]] = Component(r["component"])
+        except ValueError:
+            print(
+                f"candidate_print: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
+                file=sys.stderr,
+            )
+            continue
+        requirement_texts[r["id"]] = r["canonical_text"]
+        requirement_display_ids[r["id"]] = r["display_id"]
+    return requirement_texts, requirement_display_ids, requirement_components
+
+
+def _load_evidence_payload(
+    db: OrmSession,
+    candidate_id: str,
+    revision_id: str,
+    candidate_job_id: str | None,
+    requirement_texts: Mapping[str, str],
+    requirement_display_ids: Mapping[str, str],
+    requirement_components: Mapping[str, Component],
+) -> list[dict[str, Any]]:
+    """The exact `candidate_evidence` row shape (locator/excerpt/review),
+    copied rather than called over HTTP — same reasoning as
+    `_load_requirement_maps`."""
+    proposals_table = CandidateProposal.__table__
+    items: list[dict] = []
+    if candidate_job_id is not None:
+        proposal_row = (
+            db.execute(
+                select(proposals_table.c.items_json).where(proposals_table.c.candidate_job_id == candidate_job_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        items = proposal_row["items_json"] if proposal_row is not None else []
+
+    parse_table = ParseArtifact.__table__
+    parse_row = (
+        db.execute(
+            select(parse_table.c.source_units_json)
+            .where(parse_table.c.candidate_id == candidate_id)
+            .order_by(parse_table.c.created_at.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    unit_locators: dict[str, dict | None] = {}
+    if parse_row is not None:
+        unit_locators = {unit["id"]: unit["locator"] for unit in parse_row["source_units_json"]}
+
+    items = [item for item in items if str(item["job_requirement_id"]) in requirement_texts]
+    rows = build_evidence_rows(items, requirement_texts, requirement_display_ids, requirement_components, unit_locators)
+
+    reviews_table = EvidenceReview.__table__
+    review_rows = (
+        db.execute(
+            select(
+                reviews_table.c.job_requirement_id,
+                reviews_table.c.disputed,
+                reviews_table.c.version,
+            ).where((reviews_table.c.analysis_revision_id == revision_id) & (reviews_table.c.candidate_id == candidate_id))
+        )
+        .mappings()
+        .all()
+    )
+    reviews_by_requirement = {r["job_requirement_id"]: r for r in review_rows}
+
+    return [
+        {
+            "job_requirement_id": row.job_requirement_id,
+            "requirement_display_id": row.requirement_display_id,
+            "requirement_text": row.requirement_text,
+            "state": row.state,
+            "locator_description": row.locator_description,
+            "excerpt": row.excerpt,
+            "review": _review_projection(reviews_by_requirement.get(row.job_requirement_id)),
+        }
+        for row in rows
+    ]
+
+
+def _load_reconciliation_payload(
+    db: OrmSession,
+    analysis_session_id: str,
+    contribution_display: Mapping[str, Any],
+    precise_score_percent: Any,
+    headline_whole_percent: int,
+) -> dict[str, Any]:
+    """The exact `candidate_reconciliation` component-reshaping block,
+    copied rather than called over HTTP — same reasoning as
+    `_load_requirement_maps`."""
+    scoring_table = ScoringConfiguration.__table__
+    scoring_rows = (
+        db.execute(
+            select(scoring_table.c.component, scoring_table.c.applicable, scoring_table.c.effective_weight_bps).where(
+                scoring_table.c.analysis_session_id == analysis_session_id
+            )
+        )
+        .mappings()
+        .all()
+    )
+    by_component: dict[Component, Mapping[str, Any]] = {}
+    for r in scoring_rows:
+        try:
+            by_component[Component(r["component"])] = r
+        except ValueError:
+            print(
+                f"candidate_print: scoring_configurations has unrecognized component {r['component']!r} — excluded",
+                file=sys.stderr,
+            )
+            continue
+
+    components: list[dict[str, Any]] = []
+    for component in Component:
+        row = by_component.get(component)
+        applicable = bool(row["applicable"]) if row is not None else False
+        effective_weight_percent = (
+            str((Decimal(row["effective_weight_bps"]) / Decimal(100)).quantize(Decimal("0.01")))
+            if applicable and row is not None
+            else None
+        )
+        contribution = contribution_display.get(component.value) if applicable else None
+        components.append(
+            {
+                "component": component.value,
+                "base_weight_percent": str((Decimal(BASE_WEIGHT_BPS[component]) / Decimal(100)).quantize(Decimal("0.01"))),
+                "applicable": applicable,
+                "effective_weight_percent": effective_weight_percent,
+                "contribution_percent": str(contribution) if contribution is not None else None,
+            }
+        )
+    return {
+        "components": components,
+        "precise_score_percent": str(precise_score_percent) if precise_score_percent is not None else None,
+        "headline_whole_percent": headline_whole_percent,
+    }
+
+
+def _load_questions_payload(
+    db: OrmSession, candidate_id: str, revision_id: str, requirement_display_ids: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """The current published Interview Question Set version's items,
+    reshaped for print. `question_set_jobs.status == "published"` is the
+    "current complete version" signal (Story 7.2's coordinator is the only
+    writer of `question_set_versions`, and `published` never revisits —
+    see that story's Dev Notes on why `version` is always 1 in V1). A
+    non-empty `source_requirement_id` is remapped to the matching
+    `requirement_display_id`; an empty one (a `gap_focused` item with no
+    single grounding requirement, per `QuestionItem`'s contract) is left
+    unchanged since it is not a key into `requirement_display_ids` at all."""
+    jobs_table = QuestionSetJob.__table__
+    versions_table = QuestionSetVersion.__table__
+    row = (
+        db.execute(
+            select(versions_table.c.items_json)
+            .select_from(jobs_table)
+            .join(versions_table, versions_table.c.question_set_job_id == jobs_table.c.id)
+            .where(jobs_table.c.candidate_id == candidate_id)
+            .where(jobs_table.c.analysis_revision_id == revision_id)
+            .where(jobs_table.c.status == "published")
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return []
+    items = sorted(row["items_json"], key=lambda item: item["number"])
+    questions: list[dict[str, Any]] = []
+    for item in items:
+        source_requirement_id = str(item.get("source_requirement_id") or "")
+        questions.append(
+            {
+                "number": item["number"],
+                "category": item["category"],
+                "text": item["text"],
+                "source_requirement_id": requirement_display_ids.get(source_requirement_id, source_requirement_id),
+            }
+        )
+    return questions
+
+
+@router.get("/candidates/{candidate_id}/print/prepare")
+def candidate_print_prepare(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 7.3 (AC#1, AC#2, AC#4; AD-3, AD-18, AR-8, AR-43): the print
+    confirmation-screen projection. Independently re-authorizes via
+    `_authorize_candidate_revision` — the same neutral `_NOT_FOUND` on any
+    miss every other endpoint in this module uses. Returns metadata only
+    (no Evidence/reconciliation/questions) — `GET .../print` is the full
+    DTO. Repeated calls are trivially read-idempotent (AC#4): a published
+    revision's membership/result/Question Set never change, so this
+    function has no side effect to be idempotent about in the first place."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    member_row = _load_report_member_row(db, candidate_id, revision_row["id"])
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult", "NeedsReview"):
+        raise _NOT_FOUND
+    try:
+        metadata = _build_print_metadata(db, candidate_row, revision_row, member_row)
+        return {**metadata, "notice": dict(RESPONSIBLE_HIRING_NOTICE)}
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        print(
+            f"candidate_print_prepare: candidate {candidate_id} in revision {revision_row['id']} — {exc}",
+            file=sys.stderr,
+        )
+        raise _NOT_FOUND
+
+
+@router.get("/candidates/{candidate_id}/print")
+def candidate_print(
+    candidate_id: str,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Story 7.3 (AC#1, AC#2, AC#3, AC#4; AD-8, AD-18, AR-8, AR-43): the
+    full authorized static print DTO — the first endpoint in this codebase
+    to return published Interview Question text to a client. Independently
+    re-authorizes exactly like `candidate_print_prepare` above (AC#4: a
+    separate request gets a separate authorization check, never a cached
+    result from `prepare`). A blocked scored Candidate (Question Set not
+    yet `Complete`) returns the same metadata-only shape `prepare` already
+    returns rather than a partial Evidence/reconciliation/questions payload
+    — AD-8's "partial proposal is never visible" applies here too: a print
+    payload is either complete or withheld entirely, never half-built."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    member_row = _load_report_member_row(db, candidate_id, revision_row["id"])
+    if member_row is None or member_row["outcome"] not in ("NewResult", "ReusedResult", "NeedsReview"):
+        raise _NOT_FOUND
+    try:
+        metadata = _build_print_metadata(db, candidate_row, revision_row, member_row)
+        payload: dict[str, Any] = {**metadata, "notice": dict(RESPONSIBLE_HIRING_NOTICE)}
+        if metadata["blocked"]:
+            return payload
+
+        requirement_texts, requirement_display_ids, requirement_components = _load_requirement_maps(
+            db, candidate_row["analysis_session_id"]
+        )
+        payload["evidence"] = _load_evidence_payload(
+            db,
+            candidate_id,
+            revision_row["id"],
+            member_row["candidate_job_id"],
+            requirement_texts,
+            requirement_display_ids,
+            requirement_components,
+        )
+
+        if metadata["scope"] == SCORED_COMBINED:
+            if member_row["result_id"] is None:
+                raise ValueError("scoreable membership has no matching candidate_results row")
+            contribution_display = member_row["component_contribution_display"]
+            if contribution_display is None:
+                raise ValueError("scoreable membership has no component_contribution_display")
+            payload["reconciliation"] = _load_reconciliation_payload(
+                db,
+                candidate_row["analysis_session_id"],
+                contribution_display,
+                member_row["precise_score_percent"],
+                member_row["headline_whole_percent"],
+            )
+            payload["questions"] = _load_questions_payload(
+                db, candidate_id, revision_row["id"], requirement_display_ids
+            )
+        else:
+            payload["gate_codes"] = member_row["gate_codes"] or []
+
+        return payload
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        print(f"candidate_print: candidate {candidate_id} in revision {revision_row['id']} — {exc}", file=sys.stderr)
         raise _NOT_FOUND
 
 
