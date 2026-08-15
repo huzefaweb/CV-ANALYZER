@@ -90,7 +90,11 @@ services:
     build:
       context: ./apps/web
     working_dir: /app
-    command: ["npm", "run", "dev"]
+    # Production build (Story 8.1): `next dev`'s Turbopack server unconditionally
+    # overwrites Cache-Control with `no-cache, must-revalidate` (deferred-work.md,
+    # Story 2.4 entry) and 404s the nested retry route under Turbopack dev mode
+    # (deferred-work.md, Story 5.4 entry). `next start` avoids both.
+    command: sh -c "npm run build && npm run start"
     environment:
       # Server-side only (no NEXT_PUBLIC_ prefix) — browser JS never talks to
       # the gateway directly (AD-2/AD-21).
