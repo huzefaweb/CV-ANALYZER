@@ -35,7 +35,7 @@ type RankedReport = {
   notice: { version: number; text: string };
   headline_whole_percent: number;
   precise_score_percent: string | null;
-  question_set_state: "NotGenerated" | "Generating";
+  question_set_state: "NotGenerated" | "Generating" | "Recovering" | "Retrying" | "Complete" | "Failed";
 };
 
 type NeedsReviewReport = Omit<

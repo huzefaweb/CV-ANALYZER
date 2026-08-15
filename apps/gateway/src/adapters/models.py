@@ -455,3 +455,27 @@ class QuestionSetProposal(Base):
     analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
     items_json: Mapped[list] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class QuestionSetVersion(Base):
+    """Story 7.2 (AR-17, AR-34): one immutable, published Interview Question
+    Set version per finalized `QuestionSetJob` — the gateway Question
+    coordinator's (`question_finalizer.py`) only writer. Unique on
+    `question_set_job_id` (mirrors `CandidateResult`'s append-only,
+    immutable-row shape); `version` is monotonic per `(candidate_id,
+    analysis_revision_id)`, always `1` in V1 since a `question_set_jobs` row
+    can only be retried from `status='failed'`, never from `'published'` —
+    no code path in this codebase creates a second version for the same
+    (Candidate, revision) pair. The column is a genuine forward-compat seam,
+    not a placeholder: a future story relaxing that retry guard would only
+    need to change the guard, not the versioning arithmetic here."""
+
+    __tablename__ = "question_set_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    question_set_job_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_revision_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    items_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

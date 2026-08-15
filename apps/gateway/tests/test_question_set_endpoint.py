@@ -31,6 +31,7 @@ from src.adapters.models import (
     CandidateResult,
     Document,
     QuestionSetJob,
+    QuestionSetProposal,
     RevisionMembership,
     Shortlist,
 )
@@ -54,9 +55,9 @@ def db():
 def _clean_tables(db):
     db.execute(
         text(
-            "TRUNCATE TABLE sessions, users, question_set_proposals, question_set_jobs, shortlists, "
-            "evidence_reviews, candidate_proposals, candidate_results, candidate_identities, parse_artifacts, "
-            "revision_memberships, candidate_jobs, job_requirements, candidates, documents, "
+            "TRUNCATE TABLE sessions, users, question_set_versions, question_set_proposals, question_set_jobs, "
+            "shortlists, evidence_reviews, candidate_proposals, candidate_results, candidate_identities, "
+            "parse_artifacts, revision_memberships, candidate_jobs, job_requirements, candidates, documents, "
             "analysis_revisions, analysis_sessions CASCADE"
         )
     )
@@ -406,3 +407,122 @@ def test_generation_does_not_mutate_result_rank_or_shortlist(db):
     shortlist = db.execute(select(Shortlist).where(Shortlist.candidate_id == candidate_id)).scalars().one()
     assert shortlist.state == "NotShortlisted"
     assert shortlist.version == 1
+
+
+def _post_retry(client, token, candidate_id, idempotency_key, revision_number=None):
+    client.cookies.set("session", token)
+    url = f"/workspace/candidates/{candidate_id}/question-set/retry"
+    if revision_number is not None:
+        url += f"?revision_number={revision_number}"
+    response = client.post(url, json={"idempotency_key": idempotency_key})
+    client.cookies.clear()
+    return response
+
+
+def test_retry_with_no_job_is_neutral_404(db):
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+
+    response = _post_retry(client, token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
+
+
+def test_retry_on_failed_job_resets_to_queued_attempt_one(db):
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+    _post(client, token, candidate_id, "key-1")
+    db.execute(
+        QuestionSetJob.__table__.update()
+        .where(QuestionSetJob.candidate_id == candidate_id)
+        .values(status="failed", attempt=2, failure_reason="provider_unavailable")
+    )
+    db.commit()
+
+    response = _post_retry(client, token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 202
+    assert response.json() == {"question_set_state": "Retrying"}
+    row = db.execute(select(QuestionSetJob).where(QuestionSetJob.candidate_id == candidate_id)).scalars().one()
+    assert row.status == "queued"
+    assert row.attempt == 1
+    assert row.failure_reason is None
+
+
+def test_retry_on_unrecoverable_job_also_resets_to_queued_attempt_one(db):
+    """Review fix (Blind Hunter/Edge Case Hunter, convergent Medium):
+    'unrecoverable' (question_finalizer.py::_unstick_job's terminal status
+    for a data-integrity edge case) must be retriable too, not silently
+    no-op like a duplicate/in-flight job would."""
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+    _post(client, token, candidate_id, "key-1")
+    db.execute(
+        QuestionSetJob.__table__.update()
+        .where(QuestionSetJob.candidate_id == candidate_id)
+        .values(status="unrecoverable", attempt=2, failure_reason="unstuck")
+    )
+    db.commit()
+
+    response = _post_retry(client, token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 202
+    assert response.json() == {"question_set_state": "Retrying"}
+    row = db.execute(select(QuestionSetJob).where(QuestionSetJob.candidate_id == candidate_id)).scalars().one()
+    assert row.status == "queued"
+    assert row.attempt == 1
+    assert row.failure_reason is None
+
+
+def test_retry_discards_stale_rejected_proposal(db):
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+    _post(client, token, candidate_id, "key-1")
+    job = db.execute(select(QuestionSetJob).where(QuestionSetJob.candidate_id == candidate_id)).scalars().one()
+    db.add(
+        QuestionSetProposal(
+            id=str(uuid.uuid4()),
+            question_set_job_id=job.id,
+            candidate_id=candidate_id,
+            analysis_revision_id=job.analysis_revision_id,
+            items_json=[{"number": 1, "category": "gap_focused", "text": "stale"}],
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db.execute(
+        QuestionSetJob.__table__.update().where(QuestionSetJob.id == job.id).values(status="failed", failure_reason="incomplete_proposal")
+    )
+    db.commit()
+
+    response = _post_retry(client, token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 202
+    count = db.execute(
+        select(QuestionSetProposal).where(QuestionSetProposal.question_set_job_id == job.id)
+    ).scalars().all()
+    assert len(count) == 0
+
+
+def test_retry_on_non_failed_job_is_idempotent_no_op_returning_current_state(db):
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+    _post(client, token, candidate_id, "key-1")  # job is 'queued', not 'failed'
+
+    response = _post_retry(client, token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 202
+    assert response.json() == {"question_set_state": "Generating"}
+    rows = db.execute(select(QuestionSetJob).where(QuestionSetJob.candidate_id == candidate_id)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "queued"
+
+
+def test_retry_cross_owner_is_the_same_neutral_404(db):
+    _, token, _, _, candidate_id = _seed_ranked_candidate(db)
+    _post(client, token, candidate_id, "key-1")
+    db.execute(
+        QuestionSetJob.__table__.update().where(QuestionSetJob.candidate_id == candidate_id).values(status="failed")
+    )
+    db.commit()
+    _, other_token = _admitted_identity_and_token(db)
+
+    response = _post_retry(client, other_token, candidate_id, "retry-key-1")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}

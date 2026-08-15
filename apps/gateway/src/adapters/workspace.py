@@ -26,6 +26,7 @@ from ..domain.evidence_summary import summarize_evidence
 from ..domain.identity import Identity
 from ..domain.notice import RESPONSIBLE_HIRING_NOTICE
 from ..domain.progress_projection import FAILED, NEEDS_REVIEW, SUCCEEDED, derive_row_state
+from ..domain.question_set_projection import derive_question_set_state
 from ..domain.scoring_configuration import BASE_WEIGHT_BPS, Component
 from .authorization import authorize_owned_row
 from .db import get_db
@@ -43,6 +44,7 @@ from .models import (
     JobRequirement,
     ParseArtifact,
     QuestionSetJob,
+    QuestionSetProposal,
     RevisionMembership,
     ScoringConfiguration,
     Shortlist,
@@ -756,6 +758,9 @@ def candidate_report(
                 shortlists_table.c.state.label("shortlist_state"),
                 shortlists_table.c.version.label("shortlist_version"),
                 question_set_jobs_table.c.id.label("question_set_job_id"),
+                question_set_jobs_table.c.status.label("question_set_job_status"),
+                question_set_jobs_table.c.reclaim_count.label("question_set_reclaim_count"),
+                question_set_jobs_table.c.failure_reason.label("question_set_failure_reason"),
             )
             .select_from(candidates_table)
             .join(documents_table, documents_table.c.id == candidates_table.c.document_id)
@@ -873,12 +878,14 @@ def candidate_report(
                 if member_row["precise_score_percent"] is not None
                 else None
             )
-            # Story 7.1 (AC#1): only these two states exist yet — a
-            # completed-but-unpublished worker proposal or an exhausted
-            # attempt is not yet inspectable/actionable by a Recruiter
-            # (Story 7.2's scope), so both project as "Generating".
-            report["question_set_state"] = (
-                "Generating" if member_row["question_set_job_id"] is not None else "NotGenerated"
+            # Story 7.2: the full six-state vocabulary
+            # (NotGenerated/Generating/Recovering/Retrying/Complete/Failed),
+            # derived from question_set_jobs' internal status/reclaim_count/
+            # failure_reason by the pure question_set_projection module.
+            report["question_set_state"] = derive_question_set_state(
+                member_row["question_set_job_status"],
+                member_row["question_set_reclaim_count"] or 0,
+                member_row["question_set_failure_reason"],
             )
         else:
             report["gate_codes"] = member_row["gate_codes"] or []
@@ -1583,7 +1590,7 @@ def candidate_question_set(
     try:
         existing = (
             db.execute(
-                select(jobs_table.c.id)
+                select(jobs_table.c.status, jobs_table.c.reclaim_count, jobs_table.c.failure_reason)
                 .where(jobs_table.c.candidate_id == candidate_id)
                 .where(jobs_table.c.analysis_revision_id == revision_id)
             )
@@ -1592,11 +1599,18 @@ def candidate_question_set(
         )
         if existing is not None:
             # AC#1: requested once, duplicated, or refreshed all return the
-            # one existing job's current, coarse-grained state (only
-            # NotGenerated/Generating are ever projected in this story —
-            # there is no regenerate control once a job exists for this
-            # revision, by design; Story 7.2 owns retry/publish).
-            return JSONResponse(status_code=202, content={"question_set_state": "Generating"})
+            # one existing job's current real state. Review fix (Blind
+            # Hunter, High): this used to hardcode "Generating" regardless
+            # of actual status — harmless in 7.1 (only two states existed),
+            # but after 7.2 introduced Complete/Failed/Recovering/Retrying,
+            # a duplicate POST against a since-published or since-failed job
+            # would misreport "Generating" forever (masking a Failed state
+            # behind a permanently-stale label until reload). Now uses the
+            # same projection the report and retry endpoint already use.
+            state = derive_question_set_state(
+                existing["status"], existing["reclaim_count"] or 0, existing["failure_reason"]
+            )
+            return JSONResponse(status_code=202, content={"question_set_state": state})
 
         new_id = str(uuid.uuid4())
         try:
@@ -1636,4 +1650,141 @@ def candidate_question_set(
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         db.rollback()
         print(f"candidate_question_set: candidate {candidate_id} — {exc}", file=sys.stderr)
+        raise _NOT_FOUND
+
+
+class QuestionSetRetryRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/candidates/{candidate_id}/question-set/retry")
+def candidate_question_set_retry(
+    candidate_id: str,
+    body: QuestionSetRetryRequest,
+    revision_number: int | None = Query(default=None, ge=1, le=2147483647),
+    identity: Identity = Depends(require_admitted_identity),
+    db: OrmSession = Depends(get_db),
+) -> Any:
+    """Story 7.2 (AC#3; AR-8, AR-34): the isolated retry command — restarts
+    an exhausted `question_set_jobs` row (`status='failed'`, whether from
+    the worker's own attempt exhaustion or the coordinator's
+    `'incomplete_proposal'` rejection) at a fresh `attempt=1` cycle. Only
+    ever touches `question_set_jobs`/`question_set_proposals` for this one
+    Candidate — never `candidate_results`, `revision_memberships`,
+    `evidence_reviews`, or `shortlists` ("isolated": a downstream Question
+    Set failure never mutates Candidate analysis, and this command is a
+    completely separate code path from `retry_revision.py`'s Candidate-level
+    retry).
+
+    Same two-hop ownership check and eligibility gate as
+    `candidate_question_set` (only a successful `NewResult`/`ReusedResult`
+    membership may retry). A missing job, or a job not in `status='failed'`,
+    is not an error: AC#3's "duplicate commands... are idempotent" means a
+    retry click against a job that is already in flight or already
+    published returns the job's current real state via
+    `question_set_projection.derive_question_set_state`, never a `409` —
+    mirrors `candidate_question_set`'s own choice to fold duplicates into a
+    `202` rather than surface a conflict."""
+    candidate_row, revision_row, is_current = _authorize_candidate_revision(
+        db, identity, candidate_id, revision_number
+    )
+    revision_id = revision_row["id"]
+
+    memberships_table = RevisionMembership.__table__
+    membership_row = (
+        db.execute(
+            select(memberships_table.c.outcome)
+            .where(memberships_table.c.candidate_id == candidate_id)
+            .where(memberships_table.c.analysis_revision_id == revision_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if membership_row is None or membership_row["outcome"] not in ("NewResult", "ReusedResult"):
+        raise _NOT_FOUND
+
+    jobs_table = QuestionSetJob.__table__
+    proposals_table = QuestionSetProposal.__table__
+
+    try:
+        existing = (
+            db.execute(
+                select(jobs_table)
+                .where(jobs_table.c.candidate_id == candidate_id)
+                .where(jobs_table.c.analysis_revision_id == revision_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is None:
+            raise _NOT_FOUND
+
+        if existing["status"] not in ("failed", "unrecoverable"):
+            state = derive_question_set_state(
+                existing["status"], existing["reclaim_count"] or 0, existing["failure_reason"]
+            )
+            return JSONResponse(status_code=202, content={"question_set_state": state})
+
+        # Review fix (Blind Hunter/Edge Case Hunter, convergent Medium):
+        # accepts 'unrecoverable' (question_finalizer.py::_unstick_job's
+        # data-integrity-edge-case terminal status) as well as 'failed' —
+        # both project as the same public "Failed" state, so a Recruiter
+        # sees an active Retry button for either; previously only 'failed'
+        # was accepted, meaning an 'unrecoverable' job's Retry click
+        # silently no-op'd (202 with the unchanged current state, no error
+        # surfaced). In practice 'unrecoverable' requires either an orphaned
+        # candidate/session (which independently makes the Report itself
+        # unreachable via _authorize_candidate_revision) or a stale
+        # membership outcome (which independently removes question_set_state
+        # from the report's projection entirely) — so this is defensive
+        # depth against those invariants ever weakening, not evidence they
+        # are broken today.
+        #
+        # A stale proposal may exist from a prior 'completed' attempt the
+        # coordinator rejected (question_finalizer.py's
+        # 'incomplete_proposal' branch) — question_set_proposals is unique
+        # on question_set_job_id, and the worker's stage_success uses
+        # ON CONFLICT DO NOTHING, which would silently swallow the next
+        # attempt's proposal if the old rejected one were left in place. It
+        # was never published (no question_set_versions row references it),
+        # so discarding it here is safe and necessary for the retry to
+        # actually produce a new attempt.
+        db.execute(proposals_table.delete().where(proposals_table.c.question_set_job_id == existing["id"]))
+
+        job_cas = db.execute(
+            jobs_table.update()
+            .where(jobs_table.c.id == existing["id"])
+            .where(jobs_table.c.status.in_(("failed", "unrecoverable")))
+            .values(
+                status="queued",
+                attempt=1,
+                reclaim_count=0,
+                failure_reason=None,
+                lease_token=None,
+                lease_expires_at=None,
+                generation=jobs_table.c.generation + 1,
+                state_version=jobs_table.c.state_version + 1,
+            )
+        )
+        if job_cas.rowcount != 1:
+            # Concurrent retry already won (or, in principle, the
+            # coordinator racing to finalize a stale failure — not
+            # reachable since 'failed' is terminal for the coordinator, but
+            # defended).
+            db.rollback()
+            current = (
+                db.execute(select(jobs_table).where(jobs_table.c.id == existing["id"])).mappings().one_or_none()
+            )
+            if current is None:
+                raise _NOT_FOUND
+            state = derive_question_set_state(
+                current["status"], current["reclaim_count"] or 0, current["failure_reason"]
+            )
+            return JSONResponse(status_code=202, content={"question_set_state": state})
+
+        db.commit()
+        return JSONResponse(status_code=202, content={"question_set_state": "Retrying"})
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        db.rollback()
+        print(f"candidate_question_set_retry: candidate {candidate_id} — {exc}", file=sys.stderr)
         raise _NOT_FOUND

@@ -58,7 +58,7 @@ def db():
 def _clean_tables(db):
     db.execute(
         text(
-            "TRUNCATE TABLE sessions, users, question_set_proposals, question_set_jobs, shortlists, "
+            "TRUNCATE TABLE sessions, users, question_set_versions, question_set_proposals, question_set_jobs, shortlists, "
             "candidate_proposals, candidate_results, "
             "candidate_identities, revision_memberships, candidate_jobs, job_requirements, "
             "candidates, documents, analysis_revisions, analysis_sessions CASCADE"
@@ -359,6 +359,74 @@ def test_ranked_report_shows_generating_once_a_question_set_job_exists(db):
 
     assert response.status_code == 200
     assert response.json()["question_set_state"] == "Generating"
+
+
+def _seed_ranked_candidate_with_question_set_job(db, *, status: str, reclaim_count: int = 0, failure_reason: str | None = None):
+    identity, token = _admitted_identity_and_token(db)
+    session_id = _seed_session(db, identity.issuer, identity.subject)
+    revision_id = _seed_revision(db, session_id, published_at=datetime.now(timezone.utc))
+    candidate_id = _seed_candidate(
+        db, revision_id=revision_id, session_id=session_id, document_reference="D3", outcome="NewResult",
+        headline_whole_percent=70, precise_score_percent=Decimal("70.00"),
+    )
+    db.add(
+        QuestionSetJob(
+            id=str(uuid.uuid4()),
+            candidate_id=candidate_id,
+            analysis_revision_id=revision_id,
+            status=status,
+            idempotency_key="key-1",
+            created_at=datetime.now(timezone.utc),
+            reclaim_count=reclaim_count,
+            failure_reason=failure_reason,
+        )
+    )
+    db.commit()
+    return token, candidate_id
+
+
+def test_ranked_report_shows_recovering_on_queued_job_with_reclaim(db):
+    token, candidate_id = _seed_ranked_candidate_with_question_set_job(db, status="queued", reclaim_count=1)
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/report")
+    client.cookies.clear()
+
+    assert response.json()["question_set_state"] == "Recovering"
+
+
+def test_ranked_report_shows_retrying_on_queued_job_with_failure_reason(db):
+    token, candidate_id = _seed_ranked_candidate_with_question_set_job(
+        db, status="queued", failure_reason="provider_unavailable"
+    )
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/report")
+    client.cookies.clear()
+
+    assert response.json()["question_set_state"] == "Retrying"
+
+
+def test_ranked_report_shows_complete_on_published_job(db):
+    token, candidate_id = _seed_ranked_candidate_with_question_set_job(db, status="published")
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/report")
+    client.cookies.clear()
+
+    assert response.json()["question_set_state"] == "Complete"
+
+
+def test_ranked_report_shows_failed_on_failed_job(db):
+    token, candidate_id = _seed_ranked_candidate_with_question_set_job(
+        db, status="failed", failure_reason="incomplete_proposal"
+    )
+
+    client.cookies.set("session", token)
+    response = client.get(f"/workspace/candidates/{candidate_id}/report")
+    client.cookies.clear()
+
+    assert response.json()["question_set_state"] == "Failed"
 
 
 def test_failed_candidate_has_no_report(db):

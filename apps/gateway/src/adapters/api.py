@@ -17,6 +17,7 @@ from .identity import router as identity_router
 from .new_analysis import router as new_analysis_router
 from .preparation_finalizer import scan_and_finalize
 from .publication_coordinator import scan_and_publish
+from .question_finalizer import scan_and_finalize_questions
 from .recovery_sweep import sweep_stale
 from .retry_revision import router as retry_revision_router
 from .workspace import router as workspace_router
@@ -130,12 +131,38 @@ async def _run_publication_loop() -> None:
         await asyncio.sleep(_PUBLICATION_SCAN_INTERVAL_SECONDS)
 
 
+# AR-18/AR-34: Question coordinator runs on the same stateless,
+# level-triggered pattern as the four loops above — immediate startup scan,
+# then a 2-second cadence (AR-15's general ≤2-second coordinator bound).
+_QUESTION_FINALIZER_SCAN_INTERVAL_SECONDS = 2
+
+
+async def _run_question_finalizer_loop() -> None:
+    while True:
+        try:
+            db = db_module._SessionLocal()
+            try:
+                await asyncio.to_thread(scan_and_finalize_questions, db)
+            finally:
+                # A close()-time failure must not shadow a real scan
+                # exception from the except clause below (same discipline
+                # as the other four loops' review-fixed close() handling).
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 - one bad iteration must not kill the loop
+            print(f"question finalizer scan failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(_QUESTION_FINALIZER_SCAN_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     finalizer_task = asyncio.create_task(_run_finalizer_loop())
     sweep_task = asyncio.create_task(_run_recovery_sweep_loop())
     candidate_finalizer_task = asyncio.create_task(_run_candidate_finalizer_loop())
     publication_task = asyncio.create_task(_run_publication_loop())
+    question_finalizer_task = asyncio.create_task(_run_question_finalizer_loop())
     try:
         yield
     finally:
@@ -143,6 +170,7 @@ async def lifespan(_: FastAPI):
         sweep_task.cancel()
         candidate_finalizer_task.cancel()
         publication_task.cancel()
+        question_finalizer_task.cancel()
 
 
 app = FastAPI(title="CV Analyzer Gateway", lifespan=lifespan)
