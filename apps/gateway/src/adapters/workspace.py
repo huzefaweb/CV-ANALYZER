@@ -524,9 +524,12 @@ def session_results(
     requirements_table = JobRequirement.__table__
     requirement_rows = (
         db.execute(
-            select(requirements_table.c.id, requirements_table.c.canonical_text, requirements_table.c.component).where(
-                requirements_table.c.analysis_session_id == session_id
-            )
+            select(
+                requirements_table.c.id,
+                requirements_table.c.display_id,
+                requirements_table.c.canonical_text,
+                requirements_table.c.component,
+            ).where(requirements_table.c.analysis_session_id == session_id)
         )
         .mappings()
         .all()
@@ -534,15 +537,18 @@ def session_results(
     requirement_texts: dict[str, str] = {}
     requirement_components: dict[str, Component] = {}
     for r in requirement_rows:
+        # Keyed by display_id, not the row's own UUID `id` — see
+        # candidate_finalizer.py's _assemble_scoreability_inputs for why
+        # (same fix, same bug, every inline copy of this pattern).
         try:
-            requirement_components[r["id"]] = Component(r["component"])
+            requirement_components[r["display_id"]] = Component(r["component"])
         except ValueError:
             # Defended, not expected: a Job Requirement with a component
             # value outside the frozen AD-10 vocabulary would otherwise
             # crash requirement lookup for every Candidate in the session.
             print(f"results projection: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection", file=sys.stderr)
             continue
-        requirement_texts[r["id"]] = r["canonical_text"]
+        requirement_texts[r["display_id"]] = r["canonical_text"]
 
     proposals_table = CandidateProposal.__table__
 
@@ -810,7 +816,10 @@ def candidate_report(
         requirement_rows = (
             db.execute(
                 select(
-                    requirements_table.c.id, requirements_table.c.canonical_text, requirements_table.c.component
+                    requirements_table.c.id,
+                    requirements_table.c.display_id,
+                    requirements_table.c.canonical_text,
+                    requirements_table.c.component,
                 ).where(requirements_table.c.analysis_session_id == candidate_row["analysis_session_id"])
             )
             .mappings()
@@ -819,15 +828,18 @@ def candidate_report(
         requirement_texts: dict[str, str] = {}
         requirement_components: dict[str, Component] = {}
         for r in requirement_rows:
+            # Keyed by display_id, not the row's own UUID `id` — see
+            # candidate_finalizer.py's _assemble_scoreability_inputs for why
+            # (same fix, same bug, every inline copy of this pattern).
             try:
-                requirement_components[r["id"]] = Component(r["component"])
+                requirement_components[r["display_id"]] = Component(r["component"])
             except ValueError:
                 print(
                     f"candidate_report: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
                     file=sys.stderr,
                 )
                 continue
-            requirement_texts[r["id"]] = r["canonical_text"]
+            requirement_texts[r["display_id"]] = r["canonical_text"]
 
         proposals_table = CandidateProposal.__table__
         items: list[dict] = []
@@ -998,16 +1010,19 @@ def candidate_evidence(
         requirement_display_ids: dict[str, str] = {}
         requirement_components: dict[str, Component] = {}
         for r in requirement_rows:
+            # Keyed by display_id, not the row's own UUID `id` — see
+            # candidate_finalizer.py's _assemble_scoreability_inputs for why
+            # (same fix, same bug, every inline copy of this pattern).
             try:
-                requirement_components[r["id"]] = Component(r["component"])
+                requirement_components[r["display_id"]] = Component(r["component"])
             except ValueError:
                 print(
                     f"candidate_evidence: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
                     file=sys.stderr,
                 )
                 continue
-            requirement_texts[r["id"]] = r["canonical_text"]
-            requirement_display_ids[r["id"]] = r["display_id"]
+            requirement_texts[r["display_id"]] = r["canonical_text"]
+            requirement_display_ids[r["display_id"]] = r["display_id"]
 
         parse_table = ParseArtifact.__table__
         parse_row = (
@@ -1346,16 +1361,19 @@ def _load_requirement_maps(
     requirement_display_ids: dict[str, str] = {}
     requirement_components: dict[str, Component] = {}
     for r in requirement_rows:
+        # Keyed by display_id, not the row's own UUID `id` — see
+        # candidate_finalizer.py's _assemble_scoreability_inputs for why
+        # (same fix, same bug, every inline copy of this pattern).
         try:
-            requirement_components[r["id"]] = Component(r["component"])
+            requirement_components[r["display_id"]] = Component(r["component"])
         except ValueError:
             print(
                 f"candidate_print: job_requirement {r['id']} has unrecognized component {r['component']!r} — excluded from Evidence selection",
                 file=sys.stderr,
             )
             continue
-        requirement_texts[r["id"]] = r["canonical_text"]
-        requirement_display_ids[r["id"]] = r["display_id"]
+        requirement_texts[r["display_id"]] = r["canonical_text"]
+        requirement_display_ids[r["display_id"]] = r["display_id"]
     return requirement_texts, requirement_display_ids, requirement_components
 
 

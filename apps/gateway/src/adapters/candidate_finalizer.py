@@ -60,7 +60,15 @@ def _assemble_scoreability_inputs(db: OrmSession, job: dict, candidate: dict):
         .mappings()
         .all()
     )
-    requirement_components = {row["id"]: Component(row["component"]) for row in requirement_rows}
+    # Keyed by display_id ("JR-001"), not the row's own UUID `id`: the
+    # worker only ever knows/sends back display_id as `job_requirement_id`
+    # (main.py's _fetch_job_requirements — "the exact id the provider
+    # adapter's user message already sends/expects") — confirmed live, this
+    # mismatch crashed every finalize attempt with "proposal_items does not
+    # exactly match requirement_components" the first time a Candidate
+    # proposal ever made it this far. Same fix applied at every other
+    # inline copy of this pattern in workspace.py below.
+    requirement_components = {row["display_id"]: Component(row["component"]) for row in requirement_rows}
 
     scoring_table = ScoringConfiguration.__table__
     scoring_rows = (
