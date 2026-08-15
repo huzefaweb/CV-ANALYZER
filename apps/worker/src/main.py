@@ -104,7 +104,9 @@ def _process_one(conn: psycopg.Connection, settings: Settings) -> bool:
             conn, claimed.analysis_session_id
         )
         adapter = get_active_adapter(settings)
-        proposal = adapter.derive_requirements(job_description_text, base_url=settings.ollama_host)
+        proposal = adapter.derive_requirements(
+            job_description_text, base_url=settings.ollama_host, model=settings.ollama_model
+        )
         staged = preparation_claim.stage_success(
             conn, claimed.id, claimed.generation, claimed.token, proposal.model_dump()
         )
@@ -292,7 +294,9 @@ def _process_one_candidate(conn: psycopg.Connection, settings: Settings) -> bool
         else:
             try:
                 adapter = get_active_adapter(settings)
-                proposal = adapter.propose(requirements, permitted_units, base_url=settings.ollama_host)
+                proposal = adapter.propose(
+                    requirements, permitted_units, base_url=settings.ollama_host, model=settings.ollama_model
+                )
                 validate_locators(proposal, permitted_units)
             except AnalysisProviderError as exc:
                 staged = candidate_claim.stage_provider_failure(
@@ -424,7 +428,7 @@ def _process_one_question_set(conn: psycopg.Connection, settings: Settings) -> b
 
         try:
             adapter = get_active_adapter(settings)
-            proposal = adapter.propose_questions(grounded, base_url=settings.ollama_host)
+            proposal = adapter.propose_questions(grounded, base_url=settings.ollama_host, model=settings.ollama_model)
             validate_question_shape(proposal)
             validate_question_grounding(proposal, grounded)
         except AnalysisProviderError as exc:

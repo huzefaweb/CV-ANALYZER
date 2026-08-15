@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import DEFAULT_OLLAMA_HOST, load_settings
+from src.config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL, load_settings
 
 
 def test_load_settings_returns_database_url_when_present():
@@ -32,6 +32,18 @@ def test_ollama_host_override_is_honored():
         {"WORKER_DATABASE_URL": "postgresql://example/db", "OLLAMA_HOST": "http://localhost:11434"}
     )
     assert settings.ollama_host == "http://localhost:11434"
+
+
+def test_ollama_model_defaults_when_absent():
+    settings = load_settings({"WORKER_DATABASE_URL": "postgresql://example/db"})
+    assert settings.ollama_model == DEFAULT_OLLAMA_MODEL
+
+
+def test_ollama_model_override_is_honored():
+    settings = load_settings(
+        {"WORKER_DATABASE_URL": "postgresql://example/db", "OLLAMA_MODEL": "qwen2.5:14b-instruct"}
+    )
+    assert settings.ollama_model == "qwen2.5:14b-instruct"
 
 
 def test_azure_openai_configured_requires_all_four_vars():

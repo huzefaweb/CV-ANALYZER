@@ -37,8 +37,6 @@ from ..domain.question_provider import (
 )
 from ..domain.requirement_derivation import ProposedRequirementItem, RequirementProposal, validate_schema
 
-DEFAULT_MODEL = "qwen2.5:0.5b-instruct"
-
 _REQUIREMENT_SYSTEM_PROMPT = (
     "You extract Job Requirements from a Job Description. Respond only with "
     "the requested JSON structure. Two fields are easy to confuse — keep "
@@ -338,7 +336,7 @@ def propose_questions(
     grounded: list[GroundedRequirement],
     *,
     base_url: str,
-    model: str = DEFAULT_MODEL,
+    model: str,
     timeout: float = 60.0,
 ) -> QuestionProposal:
     # One focused call per category instead of one call for all ten at once
@@ -436,7 +434,7 @@ def propose(
     source_units: list[ResumeSourceUnit],
     *,
     base_url: str,
-    model: str = DEFAULT_MODEL,
+    model: str,
     timeout: float = 60.0,
 ) -> AnalysisProposal:
     schema = AnalysisProposal.model_json_schema()
@@ -520,7 +518,7 @@ def derive_requirements(
     job_description_text: str,
     *,
     base_url: str,
-    model: str = DEFAULT_MODEL,
+    model: str,
     # 60s (this module's other default) proved too short live: a real,
     # full-length Job Description pushed qwen2.5:0.5b-instruct's CPU-bound
     # generation — now with a longer prompt and an enum-constrained schema,

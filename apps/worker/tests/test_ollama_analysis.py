@@ -23,7 +23,9 @@ UNITS = [ResumeSourceUnit(id="unit-1", text="5 years of Python.")]
 
 
 def _propose():
-    return ollama_analysis.propose(REQUIREMENTS, UNITS, base_url="http://ollama.invalid:11434")
+    return ollama_analysis.propose(
+        REQUIREMENTS, UNITS, base_url="http://ollama.invalid:11434", model="qwen2.5:0.5b-instruct"
+    )
 
 
 def test_timeout_maps_to_analysis_timed_out(monkeypatch):

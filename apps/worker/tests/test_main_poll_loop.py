@@ -60,7 +60,10 @@ def _seed_session_and_preparation(conn, *, attempt: int = 1) -> tuple[str, str]:
 
 def _settings() -> Settings:
     return Settings(
-        database_url=WORKER_DATABASE_URL, ollama_host="http://ollama.invalid:11434", azure_openai_configured=False
+        database_url=WORKER_DATABASE_URL,
+        ollama_host="http://ollama.invalid:11434",
+        ollama_model="qwen2.5:0.5b-instruct",
+        azure_openai_configured=False,
     )
 
 

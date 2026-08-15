@@ -17,7 +17,9 @@ JOB_DESCRIPTION_TEXT = "We need a Python engineer with 5+ years experience."
 
 
 def _derive():
-    return ollama_analysis.derive_requirements(JOB_DESCRIPTION_TEXT, base_url="http://ollama.invalid:11434")
+    return ollama_analysis.derive_requirements(
+        JOB_DESCRIPTION_TEXT, base_url="http://ollama.invalid:11434", model="qwen2.5:0.5b-instruct"
+    )
 
 
 def test_timeout_maps_to_analysis_timed_out(monkeypatch):
