@@ -4,15 +4,14 @@ import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import { gateCodeMessage } from "@/lib/gateCodeMessages";
 import { componentLabel } from "@/lib/componentLabels";
 import { parseRevisionParam } from "@/lib/resultsFormatting";
+import PrintInvoke from "./PrintInvoke";
 
-// Story 7.3 builds this route only as an authorized, already-fetching
-// scaffold for Story 7.4 to finish — 7.4 owns print CSS, multi-page
-// pagination/reading order, readiness-gated `window.print()` invocation,
-// repeated headers/continuation context, monochrome distinctions, and the
-// `Private recruiter decision support` footer (AD-18/EXPERIENCE.md's Print
-// Contract). Nothing below attempts print-quality layout; it exists so 7.4
-// has a real, already-authorized consumption point instead of starting from
-// nothing.
+// Story 7.4: renders 7.3's authorized server print projection (fetched
+// below, unchanged) as an actual print-quality document — semantic reading
+// order, print CSS (globals.css's `.print-page`/`.print-footer`), the
+// `Private recruiter decision support` footer, and a readiness-gated
+// `window.print()` invocation (PrintInvoke). This file owns rendering only;
+// it consumes 7.3's DTO as-is and never re-derives scope/blocked/auth.
 export const dynamic = "force-dynamic";
 
 type EvidenceRow = {
@@ -133,7 +132,9 @@ export default async function PrintDocumentPage({
   }
 
   return (
-    <main id="main">
+    <main id="main" className="print-page">
+      <PrintInvoke />
+
       <h1>
         {data.display_name} · {data.document_reference} · {data.original_filename}
       </h1>
@@ -219,6 +220,13 @@ export default async function PrintDocumentPage({
           </ol>
         </section>
       ) : null}
+
+      <footer className="print-footer">
+        <span>Private recruiter decision support</span>
+        <span>
+          {data.display_name} · {data.document_reference} · Analysis Revision {data.revision_number}
+        </span>
+      </footer>
     </main>
   );
 }

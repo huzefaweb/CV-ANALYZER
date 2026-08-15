@@ -158,3 +158,108 @@ button:disabled {
     scroll-behavior: auto;
   }
 }
+
+/* Story 7.4 — print-document rendering (UX-DR1/UX-DR32, AD-18/AD-20).
+   Techniques validated against mockups/print-report.html: break-inside
+   avoid, native thead repeat, and a position:fixed repeating footer (the
+   Chromium print engine does not implement CSS Paged Media margin boxes,
+   so @top-center/@bottom-center content is not an option here). */
+.print-page {
+  background: #fff;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px;
+}
+.print-page h1 {
+  font-size: 20pt;
+}
+.print-page h2 {
+  font-size: 13pt;
+}
+.print-page h3 {
+  font-size: 12pt;
+}
+.print-page h1,
+.print-page h2,
+.print-page h3 {
+  break-after: avoid;
+}
+.print-page p,
+.print-page li {
+  font-size: 11pt;
+}
+.print-page li,
+.print-page tr,
+.print-page .notice {
+  break-inside: avoid;
+}
+.print-page table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.print-page table thead {
+  display: table-header-group;
+}
+.print-page th,
+.print-page td {
+  border-bottom: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: right;
+}
+.print-page th:first-child,
+.print-page td:first-child {
+  text-align: left;
+}
+
+.print-footer {
+  display: none;
+}
+
+@page {
+  size: A4;
+  margin: 16mm 14mm 24mm;
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+  .no-print {
+    display: none;
+  }
+  .print-page {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+  .print-footer {
+    /* Chromium positions a fixed element in print relative to the page's
+       margin box, not the physical sheet — `bottom: 0` sits it flush
+       against the @page bottom margin's own edge (the page-content
+       flow already stops there); a positive `bottom` offset instead
+       pushes the footer up INTO the last few millimetres of content,
+       which is what a real Chromium print/PDF render caught during
+       manual verification (Task 5). Code review finding (Blind
+       Hunter/Edge Case Hunter, convergent): a long display_name/
+       document_reference could otherwise wrap and grow past the
+       reserved margin — each span is capped to one line with an
+       ellipsis so the footer's height never exceeds one text line
+       regardless of content length. */
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 14mm;
+    right: 14mm;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid var(--line);
+    padding-top: 4px;
+    font-size: 10pt;
+    color: var(--muted);
+  }
+  .print-footer span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
