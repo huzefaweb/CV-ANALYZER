@@ -1,6 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+
+// Mirrors ProgressPanel.tsx's poll cadence (Story 4.7 AC#2's "no faster
+// than 2 seconds" floor) — no reason for this control to poll more
+// aggressively than the one other live-status surface in this app already
+// does.
+const POLL_INTERVAL_MS = 2500;
 
 type QuestionSetState = "NotGenerated" | "Generating" | "Recovering" | "Retrying" | "Complete" | "Failed";
 
@@ -38,9 +45,27 @@ export default function QuestionSetControl({
   revisionNumber: number;
   initialState: QuestionSetState;
 }) {
+  const router = useRouter();
   const [state, setState] = useState<QuestionSetState>(initialState);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A generation cycle finishes entirely server-side (the gateway's
+  // question-set coordinator) — nothing tells this already-mounted
+  // component when that happens. router.refresh() re-fetches the Candidate
+  // Report's server data (including this control's own `initialState`
+  // prop and, once Complete, the question list itself) without a full page
+  // reload; this effect re-syncs local state whenever that refreshed prop
+  // arrives, since useState(initialState) only reads it once, on mount.
+  useEffect(() => {
+    setState(initialState);
+  }, [initialState]);
+
+  useEffect(() => {
+    if (state !== "Generating" && state !== "Recovering" && state !== "Retrying") return;
+    const interval = setInterval(() => router.refresh(), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [state, router]);
 
   async function handleGenerate() {
     setState("Generating");
