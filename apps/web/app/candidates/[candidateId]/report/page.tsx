@@ -13,6 +13,7 @@ import {
 import EvidenceSection, { type EvidenceRow } from "./EvidenceSection";
 import ShortlistToggle from "@/app/ShortlistToggle";
 import QuestionSetControl from "@/app/QuestionSetControl";
+import RevisionSelector from "@/app/workspace/sessions/[id]/results/RevisionSelector";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +71,21 @@ type ReconciliationProjection = {
   components: ReconciliationComponent[];
   precise_score_percent: string | null;
   headline_whole_percent: number;
+};
+
+type Question = {
+  number: number;
+  category: string;
+  text: string;
+  source_requirement_id: string;
+};
+
+const QUESTION_CATEGORY_LABEL: Record<string, string> = {
+  technical_functional: "Technical/functional",
+  experience_verification: "Experience verification",
+  gap_focused: "Gap-focused",
+  behavioral: "Behavioral",
+  follow_up: "Follow-up",
 };
 
 // Extracted once a second caller needed the identical sentence (review
@@ -140,16 +156,30 @@ export default async function CandidateReportPage({
   // reconciliation endpoint only serves scoreable (Ranked) Candidates —
   // a Needs Review Candidate's page never calls it (the endpoint's own
   // Needs-Review-404 branch is defensive-only from here).
-  const [evidenceResponse, reconciliationResponse] = await Promise.all([
+  // Reuses Story 7.3's print projection as the source of the actual
+  // question text — no dedicated "read the Question Set" endpoint exists
+  // yet, and this one already carries the exact ten grounded questions
+  // once `question_set_state` is Complete, gated by the same authorization
+  // this page already passed.
+  const questionsPath = `/workspace/candidates/${encodedId}/print${revisionQuery}`;
+  const wantsQuestions = data.outcome === "Ranked" && data.question_set_state === "Complete";
+  const revisionsPath = `/workspace/sessions/${encodeURIComponent(data.analysis_session_id)}/revisions`;
+
+  const [evidenceResponse, reconciliationResponse, questionsResponse, revisionsResponse] = await Promise.all([
     gatewayFetch(evidencePath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } }),
     data.outcome === "Ranked"
       ? gatewayFetch(reconciliationPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } })
       : Promise.resolve(null),
+    wantsQuestions ? gatewayFetch(questionsPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } }) : Promise.resolve(null),
+    gatewayFetch(revisionsPath, { headers: { Cookie: `${SESSION_COOKIE}=${token}` } }),
   ]);
 
   const evidence: EvidenceProjection | null = evidenceResponse.ok ? await evidenceResponse.json() : null;
   const reconciliation: ReconciliationProjection | null =
     reconciliationResponse && reconciliationResponse.ok ? await reconciliationResponse.json() : null;
+  const questions: Question[] | null =
+    questionsResponse && questionsResponse.ok ? (await questionsResponse.json()).questions ?? null : null;
+  const revisions = revisionsResponse.ok ? (await revisionsResponse.json()).revisions : [];
 
   return (
     <main id="main">
@@ -158,7 +188,14 @@ export default async function CandidateReportPage({
         {referenceSuffix ? <> — {referenceSuffix}</> : null} · {data.original_filename}
       </h1>
 
-      <p>
+      <RevisionSelector
+        sessionId={data.analysis_session_id}
+        revisions={revisions}
+        activeRevisionNumber={data.revision_number}
+        hrefForPublished={(revision) => `/candidates/${data.candidate_id}/report?revision=${revision.revision_number}`}
+      />
+
+      <p className="meta">
         Revision {data.revision_number} · {data.is_current ? "Current published" : "Previous"} · Created{" "}
         {createdDate} · Published {publishedDate}
       </p>
@@ -172,7 +209,8 @@ export default async function CandidateReportPage({
       <section className="panel">
         {data.outcome === "Ranked" ? (
           <>
-            <p>{data.headline_whole_percent}%</p>
+            <span className="recon headline tabular">{data.headline_whole_percent}%</span>
+            <p className="meta">Resume Evidence score · Rounded display</p>
             <PreciseValueNotice value={data.precise_score_percent} />
           </>
         ) : (
@@ -192,7 +230,7 @@ export default async function CandidateReportPage({
         {data.strengths.length === 0 && data.gaps.length === 0 ? (
           <p>No findings recorded for this Candidate.</p>
         ) : (
-          <>
+          <div className="findings">
             {data.strengths.length > 0 ? (
               <div>
                 <b>Strengths</b>
@@ -213,7 +251,7 @@ export default async function CandidateReportPage({
                 </ul>
               </div>
             ) : null}
-          </>
+          </div>
         )}
       </section>
 
@@ -245,7 +283,7 @@ export default async function CandidateReportPage({
       </section>
 
       {reconciliation !== null ? (
-        <section className="panel">
+        <section className="panel recon">
           <h2>Score reconciliation</h2>
           <div style={{ overflowX: "auto" }}>
             <table>
@@ -286,11 +324,27 @@ export default async function CandidateReportPage({
       {data.outcome === "NeedsReview" ? <p>{SHORTLIST_RETENTION_NOTE}</p> : null}
 
       {data.outcome === "Ranked" ? (
-        <QuestionSetControl
-          candidateId={data.candidate_id}
-          revisionNumber={data.revision_number}
-          initialState={data.question_set_state}
-        />
+        <section className="question-set">
+          <h2>Interview Questions</h2>
+          <QuestionSetControl
+            candidateId={data.candidate_id}
+            revisionNumber={data.revision_number}
+            initialState={data.question_set_state}
+          />
+          {questions !== null ? (
+            <ol>
+              {questions.map((q) => (
+                <li key={q.number}>
+                  <span className="category">{QUESTION_CATEGORY_LABEL[q.category] ?? q.category}</span>
+                  {q.text}
+                  {q.source_requirement_id ? (
+                    <span className="qref">Job Requirement: {q.source_requirement_id}</span>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </section>
       ) : null}
 
       <p>

@@ -29,6 +29,10 @@ export default async function WorkspacePage() {
   if (!data.session) redirect("/new-analysis");
 
   const { session } = data;
+  // A `draft` session was never Analyzed yet — its only continuation is the
+  // editable New Analysis form, not the Progress page (which has nothing to
+  // show for it and no way back to editing, a dead-end loop found live).
+  if (session.status === "draft") redirect("/new-analysis");
 
   return (
     <main id="main">

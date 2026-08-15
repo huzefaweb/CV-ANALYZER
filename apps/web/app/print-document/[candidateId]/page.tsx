@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { gatewayFetch, SESSION_COOKIE } from "@/lib/gateway";
 import { gateCodeMessage } from "@/lib/gateCodeMessages";
 import { componentLabel } from "@/lib/componentLabels";
-import { parseRevisionParam } from "@/lib/resultsFormatting";
+import { type EvidencePoint, gapText, parseRevisionParam } from "@/lib/resultsFormatting";
 import PrintInvoke from "./PrintInvoke";
 
 // Story 7.4: renders 7.3's authorized server print projection (fetched
@@ -111,6 +111,25 @@ export default async function PrintDocumentPage({
   // uses the gateway's `revision_number` key, not this app's `revision` key.
   const reportPath = `/candidates/${encodedId}/report?revision=${data.revision_number}`;
 
+  // The Print Contract (DESIGN.md/EXPERIENCE.md) requires Evidence-backed
+  // strengths/gaps in the printed output — the print projection endpoint
+  // never carried them (score/Evidence/questions only), but the Candidate
+  // Report endpoint already derives exactly this summary. Reused here
+  // rather than duplicating the derivation into a second backend payload.
+  let strengths: EvidencePoint[] = [];
+  let gaps: EvidencePoint[] = [];
+  if (!data.blocked) {
+    const reportResponse = await gatewayFetch(
+      `/workspace/candidates/${encodedId}/report?revision_number=${data.revision_number}`,
+      { headers: { Cookie: `${SESSION_COOKIE}=${token}` } },
+    );
+    if (reportResponse.ok) {
+      const reportData: { strengths: EvidencePoint[]; gaps: EvidencePoint[] } = await reportResponse.json();
+      strengths = reportData.strengths;
+      gaps = reportData.gaps;
+    }
+  }
+
   if (data.blocked) {
     return (
       <main id="main">
@@ -133,7 +152,7 @@ export default async function PrintDocumentPage({
 
   return (
     <main id="main" className="print-page">
-      <PrintInvoke />
+      <PrintInvoke backHref={reportPath} />
 
       <h1>
         {data.display_name} · {data.document_reference} · {data.original_filename}
@@ -149,10 +168,39 @@ export default async function PrintDocumentPage({
         </p>
       </div>
 
-      {data.scope === "ScoredCombined" && data.reconciliation ? (
+      {strengths.length > 0 || gaps.length > 0 ? (
         <section>
+          <h2>Findings</h2>
+          <div className="findings">
+            {strengths.length > 0 ? (
+              <div>
+                <b>Evidence-backed strengths</b>
+                <ul>
+                  {strengths.map((point, i) => (
+                    <li key={i}>{point.requirement_text}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {gaps.length > 0 ? (
+              <div>
+                <b>Gaps, uncertainty, and validation topics</b>
+                <ul>
+                  {gaps.map((point, i) => (
+                    <li key={i}>{gapText(point)}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {data.scope === "ScoredCombined" && data.reconciliation ? (
+        <section className="recon">
           <h2>Score reconciliation</h2>
-          <p>{data.reconciliation.headline_whole_percent}%</p>
+          <p className="meta">Rounded Resume Evidence score</p>
+          <p className="headline tabular">{data.reconciliation.headline_whole_percent}%</p>
           {data.reconciliation.precise_score_percent !== null ? (
             <p>Precise calculation value: {data.reconciliation.precise_score_percent}%</p>
           ) : null}
@@ -197,7 +245,11 @@ export default async function PrintDocumentPage({
             {data.evidence.map((row) => (
               <li key={row.job_requirement_id}>
                 {row.requirement_display_id}: {row.requirement_text} — {row.state}
-                {row.excerpt ? ` (“${row.excerpt}”${row.locator_description ? `, ${row.locator_description}` : ""})` : ""}
+                {row.state === "Not Found"
+                  ? " (Not Found does not mean the Candidate lacks the qualification. No source locator or excerpt is fabricated.)"
+                  : row.excerpt
+                    ? ` (“${row.excerpt}”${row.locator_description ? `, ${row.locator_description}` : ""})`
+                    : ""}
                 {row.review.state === "Disputed" ? " [Disputed]" : ""}
               </li>
             ))}
@@ -209,15 +261,19 @@ export default async function PrintDocumentPage({
 
       {data.scope === "ScoredCombined" && data.questions ? (
         <section>
-          <h2>Interview Questions</h2>
+          <h2>Ten grounded Interview Questions</h2>
           <ol>
             {data.questions.map((q) => (
               <li key={q.number}>
                 {q.text}
-                {q.source_requirement_id ? ` (${q.source_requirement_id})` : ""}
+                {q.source_requirement_id ? ` (Requirement: ${q.source_requirement_id})` : ""}
               </li>
             ))}
           </ol>
+          <p className="meta">
+            Use these questions as a human review aid. Question generation and retry do not change Candidate
+            Evidence, score, rank, Analysis Revision, or Shortlist state.
+          </p>
         </section>
       ) : null}
 

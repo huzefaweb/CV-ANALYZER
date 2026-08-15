@@ -112,22 +112,29 @@ export default function EvidenceSection({
         const review = reviews[row.job_requirement_id];
         const ui = rowUi[row.job_requirement_id];
         return (
-          <details key={row.job_requirement_id}>
+          <details key={row.job_requirement_id} className="evidence-row">
             <summary>
-              {row.requirement_display_id} · {row.requirement_text} · {row.state}
+              <span>
+                {row.requirement_display_id} · {row.requirement_text}
+              </span>
+              <span className={statusClass(row.state)}>{row.state}</span>
+              {review.state === "Disputed" ? <span className="status disputed">◇ Disputed</span> : null}
             </summary>
-            <p>Analysis state: {row.state}</p>
-            <p>Recruiter review: {review.state === "Disputed" ? "Disputed" : "No review flag"}</p>
             {row.state === "Not Found" ? (
               <p>No supporting Evidence was located. This is not proof the Candidate lacks the qualification.</p>
             ) : (
-              <>
-                <p>{row.locator_description ?? "No source location recorded."}</p>
-                <p>{row.excerpt || "No excerpt recorded."}</p>
-              </>
+              <p className="excerpt">
+                {row.excerpt || "No excerpt recorded."}
+                {row.locator_description ? ` — ${row.locator_description}` : ""}
+              </p>
             )}
+            <div className="fields">
+              <div>Analysis state: {row.state}</div>
+              <div>Recruiter review: {review.state === "Disputed" ? "Disputed" : "No review flag"}</div>
+            </div>
             <button
               type="button"
+              className="review-control"
               disabled={ui?.pending}
               aria-disabled={ui?.pending}
               onClick={() => toggleDisputed(row.job_requirement_id)}
@@ -147,4 +154,12 @@ export default function EvidenceSection({
       })}
     </div>
   );
+}
+
+function statusClass(state: string): string {
+  if (state === "Matched") return "status matched";
+  if (state === "Partial") return "status partial";
+  if (state === "Not Found") return "status not-found";
+  if (state === "Needs Validation") return "status needs-validation";
+  return "status";
 }

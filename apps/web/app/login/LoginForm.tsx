@@ -40,7 +40,7 @@ export default function LoginForm({ returnTo }: { returnTo?: string }) {
     // AC#2 (Story 2.4): returnTo is already validated server-side by
     // login/page.tsx via isAllowedReturnPath — this component trusts it as
     // a prop, never a raw query string.
-    router.push(returnTo ?? "/");
+    router.push(returnTo ?? "/workspace");
   }
 
   return (

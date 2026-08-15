@@ -91,11 +91,20 @@ export default function JobDescriptionForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} noValidate>
+    <form className="panel" onSubmit={handleSubmit} noValidate>
+      <div className="panel-head">
+        <h2>1. Job Description</h2>
+        <span className={`status ${validation.is_valid ? "ready" : ""}`}>
+          {validation.is_valid ? "✓ Valid" : "Incomplete"}
+        </span>
+      </div>
       <div>
-        <label htmlFor="job-description">Job Description</label>
-        <p id="job-description-guidance">
-          Enter at least {validation.minimum_required} non-whitespace characters describing the role. Currently {liveCount}.
+        <label htmlFor="job-description">
+          Role description <span className="meta tabular">{liveCount} characters</span>
+        </label>
+        <p id="job-description-guidance" className="meta">
+          Minimum {validation.minimum_required} non-whitespace characters and enough content to derive at least one
+          applicable Job Requirement. Length alone does not prove adequacy.
         </p>
         <textarea
           id="job-description"

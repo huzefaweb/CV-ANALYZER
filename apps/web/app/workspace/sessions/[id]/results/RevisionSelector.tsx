@@ -10,10 +10,15 @@ export default function RevisionSelector({
   sessionId,
   revisions,
   activeRevisionNumber,
+  hrefForPublished,
 }: {
   sessionId: string;
   revisions: RevisionOption[];
   activeRevisionNumber: number | null;
+  // Candidate Report reuses this same selector but must stay on the
+  // Candidate's own report at the chosen revision, not jump to Results —
+  // defaults to the original Results-page destination unchanged.
+  hrefForPublished?: (revision: RevisionOption) => string;
 }) {
   const router = useRouter();
 
@@ -26,7 +31,7 @@ export default function RevisionSelector({
     const selected = revisions.find((r) => String(r.revision_number) === event.target.value);
     if (!selected) return;
     if (selected.published) {
-      router.push(`/workspace/sessions/${sessionId}/results?revision=${selected.revision_number}`);
+      router.push(hrefForPublished ? hrefForPublished(selected) : `/workspace/sessions/${sessionId}/results?revision=${selected.revision_number}`);
     } else {
       router.push(`/workspace/sessions/${sessionId}`);
     }

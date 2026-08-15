@@ -30,8 +30,17 @@ const EMPTY_SNAPSHOT: ProgressSnapshot = {
 
 function summarize(snapshot: ProgressSnapshot): string {
   if (snapshot.rows.length === 0) return "No Documents queued yet.";
-  const parts = Object.entries(snapshot.aggregate.by_state).map(([state, count]) => `${count} ${state}`);
-  return `${snapshot.aggregate.total} total — ${parts.join(", ")}.`;
+  const terminal = snapshot.aggregate.total - (snapshot.aggregate.by_state["Queued"] ?? 0) - (snapshot.aggregate.by_state["Parsing"] ?? 0) - (snapshot.aggregate.by_state["Analyzing"] ?? 0) - (snapshot.aggregate.by_state["Recovering"] ?? 0) - (snapshot.aggregate.by_state["Retrying - Attempt 2 of 2"] ?? 0);
+  const failed = snapshot.aggregate.by_state["Failed"] ?? 0;
+  return `${terminal} of ${snapshot.aggregate.total} Documents terminal${failed > 0 ? ` · ${failed} failed` : ""}.`;
+}
+
+// DESIGN.md status-label: full text always, color supplementary only.
+function statusClass(state: string): string {
+  if (state === "Succeeded") return "status matched";
+  if (state === "Needs Review") return "status needs-validation";
+  if (state === "Failed") return "status failed";
+  return "status info";
 }
 
 export default function ProgressPanel({ sessionId }: { sessionId: string }) {
@@ -151,6 +160,8 @@ export default function ProgressPanel({ sessionId }: { sessionId: string }) {
     );
   }
 
+  const counts = snapshot.aggregate.by_state;
+
   return (
     <div className="panel">
       <h2>Progress</h2>
@@ -159,13 +170,33 @@ export default function ProgressPanel({ sessionId }: { sessionId: string }) {
           the same announcement text rather than two independently
           announcing regions. */}
       <p aria-live="polite">{reconnecting ? "Reconnecting…" : announcement}</p>
+
+      {snapshot.rows.length > 0 ? (
+        <div className="summary">
+          {Object.entries(counts).map(([state, count]) => (
+            <div className="metric" key={state}>
+              <span className="value tabular">{count}</span>
+              <span className="label">{state}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="notice">
+        Published work remains safe throughout — completed Candidates are never reprocessed. No ranking yet. Ranking
+        appears only after every Document reaches a Terminal State; processing order does not predict rank.
+      </div>
+
       {snapshot.rows.length === 0 ? (
         <p>No Documents queued yet.</p>
       ) : (
-        <ul>
+        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {snapshot.rows.map((row) => (
-            <li key={row.candidate_id}>
-              {row.document_reference}: {row.state}
+            <li key={row.candidate_id} className="document-row">
+              <span>
+                <span className="doc-id">{row.document_reference}</span>
+              </span>
+              <span className={statusClass(row.state)}>{row.state}</span>
             </li>
           ))}
         </ul>
@@ -174,6 +205,11 @@ export default function ProgressPanel({ sessionId }: { sessionId: string }) {
         <p>
           All Documents have reached a final outcome. Ranking is suppressed until publication completes — this page
           will not navigate automatically.
+        </p>
+      ) : null}
+      {snapshot.view_results_available ? (
+        <p>
+          <a href={`/workspace/sessions/${sessionId}/results`}>View Results</a>
         </p>
       ) : null}
     </div>

@@ -291,12 +291,17 @@ export default function DocumentUpload({
   }
 
   return (
-    <div>
-      <h2>Documents</h2>
-      <p id="document-upload-guidance">
-        Up to 20 PDF or DOCX files, 10 MB each. {MAX_DOCUMENT_COUNT - readyCount} remaining.
+    <div className="panel">
+      <div className="panel-head">
+        <h2>2. Documents</h2>
+        <span className="meta tabular">
+          {readyCount} selected · {MAX_DOCUMENT_COUNT - readyCount} remaining
+        </span>
+      </div>
+      <p id="document-upload-guidance" className="meta">
+        Up to 20 PDF or DOCX files, 10 MB each.
       </p>
-      <div onDrop={onDrop} onDragOver={onDragOver}>
+      <div className="upload-control" onDrop={onDrop} onDragOver={onDragOver}>
         <label htmlFor="document-upload">Select or drop Resume files</label>
         <input
           ref={inputRef}
@@ -319,53 +324,59 @@ export default function DocumentUpload({
         aria-hidden="true"
         tabIndex={-1}
       />
-      <ul aria-live="polite">
+      <ul aria-live="polite" style={{ listStyle: "none", margin: "12px 0 0", padding: 0 }}>
         {rows.map((row) => (
-          <li key={row.key}>
+          <li key={row.key} className="document-row">
             {row.state === "pending" ? <span>{row.filename}: uploading…</span> : null}
             {row.state === "replacing" ? (
               <span>
-                {row.document.document_reference} — {row.document.original_filename} — Replacing…
+                <span className="doc-id">{row.document.document_reference}</span> {row.document.original_filename} —
+                Replacing…
               </span>
             ) : null}
             {row.state === "ready" ? (
-              <span id={`document-${row.document.id}`}>
-                <span aria-label={`${row.document.document_reference}, ${row.document.original_filename}, Ready`}>
-                  {row.document.document_reference} — {row.document.original_filename} — Ready
+              <>
+                <span id={`document-${row.document.id}`}>
+                  <span aria-label={`${row.document.document_reference}, ${row.document.original_filename}, Ready`}>
+                    <span className="doc-id">{row.document.document_reference}</span> {row.document.original_filename}{" "}
+                    <span className="status ready">Ready</span>
+                  </span>
+                  {row.message ? <span role="alert"> {row.message}</span> : null}
                 </span>
-                {row.message ? (
-                  <span role="alert"> {row.message}</span>
-                ) : null}
-                <button
-                  type="button"
-                  ref={(el) => {
-                    const refKey = `${row.key}:remove`;
-                    if (el) actionRefs.current.set(refKey, el);
-                    else actionRefs.current.delete(refKey);
-                  }}
-                  aria-label={`Remove ${row.document.document_reference}`}
-                  disabled={busyKeys.has(row.key)}
-                  onClick={() => handleRemove(row)}
-                >
-                  Remove
-                </button>
-                <button
-                  type="button"
-                  ref={(el) => {
-                    const refKey = `${row.key}:replace`;
-                    if (el) actionRefs.current.set(refKey, el);
-                    else actionRefs.current.delete(refKey);
-                  }}
-                  aria-label={`Replace ${row.document.document_reference}`}
-                  disabled={busyKeys.has(row.key)}
-                  onClick={() => triggerReplace(row)}
-                >
-                  Replace
-                </button>
-              </span>
+                <span className="doc-actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    ref={(el) => {
+                      const refKey = `${row.key}:remove`;
+                      if (el) actionRefs.current.set(refKey, el);
+                      else actionRefs.current.delete(refKey);
+                    }}
+                    aria-label={`Remove ${row.document.document_reference}`}
+                    disabled={busyKeys.has(row.key)}
+                    onClick={() => handleRemove(row)}
+                  >
+                    Remove
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    ref={(el) => {
+                      const refKey = `${row.key}:replace`;
+                      if (el) actionRefs.current.set(refKey, el);
+                      else actionRefs.current.delete(refKey);
+                    }}
+                    aria-label={`Replace ${row.document.document_reference}`}
+                    disabled={busyKeys.has(row.key)}
+                    onClick={() => triggerReplace(row)}
+                  >
+                    Replace
+                  </button>
+                </span>
+              </>
             ) : null}
             {row.state === "rejected" ? (
-              <span role="alert">
+              <span role="alert" className="rejected">
                 {row.filename} — Rejected — {row.reason}
               </span>
             ) : null}

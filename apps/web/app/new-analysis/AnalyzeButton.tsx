@@ -102,10 +102,16 @@ export default function AnalyzeButton({
   const summaryItems = errors ? toValidationSummaryItems(errors) : [];
 
   return (
-    <div>
+    <div className="panel">
+      <div className="notice">
+        <b>What freezes when analysis starts</b>
+        <br />
+        The Job Description, Ready Documents, Scoring Configuration, and version context become immutable for this
+        Analysis Session. Rejected Documents will not enter the frozen cohort.
+      </div>
       {errors && errors.length > 0 ? (
-        <div ref={summaryRef} tabIndex={-1} role="alert" id="analyze-validation-summary">
-          <p>Analyze could not start. Review the following:</p>
+        <div ref={summaryRef} tabIndex={-1} role="alert" id="analyze-validation-summary" className="validation-summary">
+          <h3>Analyze could not start. Review the following:</h3>
           <ul>
             {summaryItems.map((item, index) => (
               <li key={`${item.href}-${index}`}>

@@ -29,17 +29,19 @@ export default function NewAnalysisWorkspace({
 
   return (
     <>
-      <JobDescriptionForm
-        sessionId={sessionId}
-        initialText={initialJobDescriptionText}
-        initialVersion={initialJobDescriptionVersion}
-        initialValidation={initialValidation}
-        onSaved={({ version, validation }) => {
-          setJobDescriptionVersion(version);
-          setJobDescriptionValidation(validation);
-        }}
-      />
-      <DocumentUpload sessionId={sessionId} initialDocuments={initialDocuments} onDocumentsChange={setDocuments} />
+      <div className="work">
+        <JobDescriptionForm
+          sessionId={sessionId}
+          initialText={initialJobDescriptionText}
+          initialVersion={initialJobDescriptionVersion}
+          initialValidation={initialValidation}
+          onSaved={({ version, validation }) => {
+            setJobDescriptionVersion(version);
+            setJobDescriptionValidation(validation);
+          }}
+        />
+        <DocumentUpload sessionId={sessionId} initialDocuments={initialDocuments} onDocumentsChange={setDocuments} />
+      </div>
       <AnalyzeButton
         sessionId={sessionId}
         jobDescriptionVersion={jobDescriptionVersion}

@@ -166,7 +166,7 @@ export default async function ResultsPage({
           <a href={`/workspace/sessions/${id}/results`}>Return to current published revision</a>
         </p>
       ) : null}
-      <p>
+      <p className="meta">
         Revision {data.revision_number} · Published {publishedDate}
       </p>
       <div className="notice">
@@ -175,134 +175,160 @@ export default async function ResultsPage({
         </p>
       </div>
 
-      <section className="panel">
+      <div className="summary">
+        <div className="metric">
+          <span className="value tabular">{data.counts.ranked}</span>
+          <span className="label">Ranked</span>
+        </div>
+        <div className="metric">
+          <span className="value tabular">{data.counts.needs_review}</span>
+          <span className="label">Needs Review</span>
+        </div>
+        <div className="metric">
+          <span className="value tabular">{data.counts.failed}</span>
+          <span className="label">Failed</span>
+        </div>
+      </div>
+
+      <section className="outcome-section">
         <h2>Ranked Candidates · {data.counts.ranked}</h2>
-        <p>
+        <div className="notice">
           Displayed scores are rounded (round-half-up). Ranking uses the precise, unrounded calculation value
           available in each Candidate Report. A tie exists only when precise scores are equal; when a tie occurs,
           secondary presentation order carries no hiring meaning.
-        </p>
+        </div>
         {data.ranked.length === 0 ? (
           <p>No Candidates were ranked in this revision.</p>
         ) : (
-          <ol>
+          <ol style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {data.ranked.map((row) => (
-              <li key={row.candidate_id} value={row.rank_position}>
-                <p>
-                  <b>{row.display_name}</b>
-                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
-                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
-                  ) : null} ·{" "}
-                  {row.original_filename}
-                </p>
-                <p>{row.headline_whole_percent}%</p>
-                {row.strengths.length > 0 ? (
-                  <div>
-                    <b>Strengths</b>
-                    <ul>
-                      {row.strengths.map((point, i) => (
-                        <li key={i}>{point.requirement_text}</li>
-                      ))}
-                    </ul>
+              <li key={row.candidate_id} value={row.rank_position} className="candidate-row">
+                <span className="rank tabular">{row.rank_position}</span>
+                <span>
+                  <p>
+                    <b>{row.display_name}</b>
+                    {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                      <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                    ) : null} ·{" "}
+                    {row.original_filename}
+                  </p>
+                  <span className="score tabular">{row.headline_whole_percent}%</span>
+                  <div className="findings">
+                    {row.strengths.length > 0 ? (
+                      <div>
+                        <b className="compact">Strengths</b>
+                        <ul>
+                          {row.strengths.map((point, i) => (
+                            <li key={i}>{point.requirement_text}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {row.gaps.length > 0 ? (
+                      <div>
+                        <b className="compact">Gap or uncertainty</b>
+                        <ul>
+                          {row.gaps.map((point, i) => (
+                            <li key={i}>{gapText(point)}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-                {row.gaps.length > 0 ? (
-                  <div>
-                    <b>Gap or uncertainty</b>
-                    <ul>
-                      {row.gaps.map((point, i) => (
-                        <li key={i}>{gapText(point)}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-                <ShortlistToggle
-                  candidateId={row.candidate_id}
-                  revisionNumber={data.revision_number}
-                  initialState={row.shortlist_state}
-                  initialVersion={row.shortlist_version}
-                />
-                <p>
-                  <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
+                </span>
+                <span className="actions">
+                  <ShortlistToggle
+                    candidateId={row.candidate_id}
+                    revisionNumber={data.revision_number}
+                    initialState={row.shortlist_state}
+                    initialVersion={row.shortlist_version}
+                  />
+                  <a className="btn secondary" href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
                     View Candidate Report
                   </a>
-                </p>
+                </span>
               </li>
             ))}
           </ol>
         )}
       </section>
 
-      <section className="panel">
+      <section className="outcome-section">
         <h2>Needs Review · {data.counts.needs_review}</h2>
         {data.needs_review.length === 0 ? (
           <p>No Documents need review in this revision.</p>
         ) : (
-          <ul>
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {data.needs_review.map((row) => (
-              <li key={row.candidate_id}>
-                <p>
-                  <span aria-hidden="true">△</span> Needs Review
-                </p>
-                <p>
-                  <b>{row.display_name}</b>
-                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
-                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
-                  ) : null} ·{" "}
-                  {row.original_filename}
-                </p>
-                <ul>
-                  {row.gate_codes.map((code) => (
-                    <li key={code}>{gateCodeMessage(code)}</li>
-                  ))}
-                </ul>
-                <ShortlistToggle
-                  candidateId={row.candidate_id}
-                  revisionNumber={data.revision_number}
-                  initialState={row.shortlist_state}
-                  initialVersion={row.shortlist_version}
-                />
-                <p>{SHORTLIST_RETENTION_NOTE}</p>
-                <p>
-                  <a href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
+              <li key={row.candidate_id} className="candidate-row" style={{ gridTemplateColumns: "1fr auto" }}>
+                <span>
+                  <span className="status needs-validation">
+                    <span aria-hidden="true">△</span> Needs Review
+                  </span>
+                  <p>
+                    <b>{row.display_name}</b>
+                    {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                      <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                    ) : null} ·{" "}
+                    {row.original_filename}
+                  </p>
+                  <ul>
+                    {row.gate_codes.map((code) => (
+                      <li key={code}>{gateCodeMessage(code)}</li>
+                    ))}
+                  </ul>
+                  <p className="meta">{SHORTLIST_RETENTION_NOTE}</p>
+                </span>
+                <span className="actions">
+                  <ShortlistToggle
+                    candidateId={row.candidate_id}
+                    revisionNumber={data.revision_number}
+                    initialState={row.shortlist_state}
+                    initialVersion={row.shortlist_version}
+                  />
+                  <a className="btn secondary" href={`/candidates/${row.candidate_id}/report?revision=${data.revision_number}`}>
                     View Candidate Report
                   </a>
-                </p>
+                </span>
               </li>
             ))}
           </ul>
         )}
       </section>
 
-      <section className="panel">
+      <section className="outcome-section">
         <h2>Failed · {data.counts.failed}</h2>
         {data.failed.length === 0 ? (
           <p>No Documents failed in this revision.</p>
         ) : (
-          <ul>
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {data.failed.map((row) => (
-              <li key={row.candidate_id}>
-                <p>
-                  <span aria-hidden="true">✕</span> Failed
-                </p>
-                <p>
-                  <b>{row.display_name}</b>
-                  {identityReferenceSuffix(row.display_name, row.document_reference) ? (
-                    <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
-                  ) : null} ·{" "}
-                  {row.original_filename}
-                </p>
-                <p>{row.failure_category}</p>
-                <ShortlistToggle
-                  candidateId={row.candidate_id}
-                  revisionNumber={data.revision_number}
-                  initialState={row.shortlist_state}
-                  initialVersion={row.shortlist_version}
-                />
-                <p>{SHORTLIST_RETENTION_NOTE}</p>
-                {data.is_current ? (
-                  <RetryButton sessionId={id} candidateId={row.candidate_id} currentRevisionNumber={data.revision_number} />
-                ) : null}
+              <li key={row.candidate_id} className="candidate-row" style={{ gridTemplateColumns: "1fr auto" }}>
+                <span>
+                  <span className="status failed">
+                    <span aria-hidden="true">✕</span> Failed
+                  </span>
+                  <p>
+                    <b>{row.display_name}</b>
+                    {identityReferenceSuffix(row.display_name, row.document_reference) ? (
+                      <> — {identityReferenceSuffix(row.display_name, row.document_reference)}</>
+                    ) : null} ·{" "}
+                    {row.original_filename}
+                  </p>
+                  <p>{row.failure_category}</p>
+                  <p className="meta">{SHORTLIST_RETENTION_NOTE}</p>
+                </span>
+                <span className="actions">
+                  <ShortlistToggle
+                    candidateId={row.candidate_id}
+                    revisionNumber={data.revision_number}
+                    initialState={row.shortlist_state}
+                    initialVersion={row.shortlist_version}
+                  />
+                  {data.is_current ? (
+                    <RetryButton sessionId={id} candidateId={row.candidate_id} currentRevisionNumber={data.revision_number} />
+                  ) : null}
+                </span>
               </li>
             ))}
           </ul>

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import "./globals.css";
+import AppBar from "./AppBar";
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
@@ -8,6 +9,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <a className="skip-link" href="#main">
           Skip to main content
         </a>
+        <AppBar />
         {children}
       </body>
     </html>

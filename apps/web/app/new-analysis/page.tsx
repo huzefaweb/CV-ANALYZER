@@ -71,25 +71,31 @@ export default async function NewAnalysisPage() {
     return (
       <main id="main">
         <h1>New Analysis</h1>
+        <p className="meta">Prepare one Job Description and 1–20 Resumes as one comparison task.</p>
         <div className="notice" aria-live="polite">
           {draft.preparation
             ? preparationStatusNotice(draft.preparation.status)
             : "Analysis preparation is in progress. New Analysis will be available again once this session finishes."}
         </div>
-        <section aria-labelledby="job-description-locked">
-          <h2 id="job-description-locked">Job Description</h2>
-          <p>{draft.job_description_text}</p>
-        </section>
-        <section aria-labelledby="documents-locked">
-          <h2 id="documents-locked">Documents</h2>
-          <ul>
-            {documents.map((document) => (
-              <li key={document.id}>
-                {document.document_reference} — {document.original_filename}
-              </li>
-            ))}
-          </ul>
-        </section>
+        <p>
+          <a href={`/workspace/sessions/${draft.id}`}>View progress</a>
+        </p>
+        <div className="work">
+          <section className="panel" aria-labelledby="job-description-locked">
+            <h2 id="job-description-locked">1. Job Description</h2>
+            <p>{draft.job_description_text}</p>
+          </section>
+          <section className="panel" aria-labelledby="documents-locked">
+            <h2 id="documents-locked">2. Documents</h2>
+            <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+              {documents.map((document) => (
+                <li key={document.id} className="document-row">
+                  <span className="doc-id">{document.document_reference}</span> {document.original_filename}
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
       </main>
     );
   }
@@ -97,6 +103,16 @@ export default async function NewAnalysisPage() {
   return (
     <main id="main">
       <h1>New Analysis</h1>
+      <p className="meta">Prepare one Job Description and 1–20 Resumes as one comparison task.</p>
+      {draft.preparation?.status === "failed" ? (
+        // Only reachable branch for preparationStatusNotice("failed"): a
+        // failed preparation unlocks the session back to plain `draft`
+        // (preparation_finalizer.py/recovery_sweep.py), so this never shows
+        // in the locked view above — it has to render here instead.
+        <div className="notice" aria-live="polite">
+          {preparationStatusNotice("failed")}
+        </div>
+      ) : null}
       <NewAnalysisWorkspace
         sessionId={draft.id}
         initialJobDescriptionText={draft.job_description_text}

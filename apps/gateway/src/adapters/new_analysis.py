@@ -81,21 +81,22 @@ def _project_preparation(row: Mapping[str, Any]) -> dict[str, Any]:
 def _full_project(db: OrmSession, row: Mapping[str, Any]) -> dict[str, Any]:
     """The complete draft/locked-session projection — deliberately separate
     from `workspace.py`'s minimal `_project` (id/status/created_at only),
-    which stays untouched by this story. `preparation` is `null` for a
-    `draft` session and also `null` if a non-`draft` session has no
-    `StartPreparation` row yet (e.g. a directly-seeded test fixture) —
-    otherwise the locked session's Start Preparation snapshot (AC#3:
-    reconstructing locked state on refresh)."""
+    which stays untouched by this story. `preparation` is `null` if no
+    `StartPreparation` row exists yet — otherwise its snapshot, looked up
+    regardless of session status (not just when locked): a `failed`
+    preparation unlocks the session back to `draft` (AC#3), and the draft
+    view needs that snapshot too or a prior failure goes unexplained (the
+    only place `preparationStatusNotice("failed")` on the client can ever
+    actually render from)."""
     preparation = None
-    if row["status"] != "draft":
-        prep_table = StartPreparation.__table__
-        prep_row = (
-            db.execute(select(prep_table).where(prep_table.c.analysis_session_id == row["id"]))
-            .mappings()
-            .one_or_none()
-        )
-        if prep_row is not None:
-            preparation = _project_preparation(prep_row)
+    prep_table = StartPreparation.__table__
+    prep_row = (
+        db.execute(select(prep_table).where(prep_table.c.analysis_session_id == row["id"]))
+        .mappings()
+        .one_or_none()
+    )
+    if prep_row is not None:
+        preparation = _project_preparation(prep_row)
 
     return {
         "id": row["id"],
@@ -266,6 +267,21 @@ def analyze(
         .mappings()
         .one_or_none()
     )
+
+    # AC#3/Story 3.4 intent ("you can adjust the Job Description or Documents
+    # and try Analyze again") requires a genuine new attempt to be possible
+    # once a prior preparation failed and unlocked the session back to
+    # `draft` — `analysis_session_id` is unique on this table, so without
+    # this the `existing_prep is not None` branch below would keep
+    # re-finding the dead row forever and no session could ever progress
+    # past one failed preparation (bug found live: `session_not_preparing`,
+    # `stale_*_version`, `invalid_proposal_schema`, `conflicting_requirements`,
+    # `no_applicable_requirements`, `no_ready_documents` in
+    # preparation_finalizer.py, and `lease_exhausted` in recovery_sweep.py
+    # all terminate this way).
+    if existing_prep is not None and existing_prep["status"] == "failed" and row["status"] == "draft":
+        db.execute(prep_table.delete().where(prep_table.c.id == existing_prep["id"]))
+        existing_prep = None
 
     if existing_prep is not None:
         same_key = existing_prep["idempotency_key"] == body.idempotency_key

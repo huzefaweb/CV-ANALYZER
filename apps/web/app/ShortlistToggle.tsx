@@ -76,7 +76,14 @@ export default function ShortlistToggle({
 
   return (
     <div>
-      <button type="button" disabled={pending} aria-disabled={pending} aria-live="polite" onClick={handleToggle}>
+      <button
+        type="button"
+        className="shortlist-control"
+        disabled={pending}
+        aria-disabled={pending}
+        aria-live="polite"
+        onClick={handleToggle}
+      >
         {shortlistLabel(shortlist.state)}
       </button>
       {error ? (

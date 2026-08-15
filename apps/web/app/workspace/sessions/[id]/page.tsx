@@ -49,11 +49,10 @@ export default async function WorkspaceSessionPage({ params }: { params: Promise
 
   return (
     <main id="main">
-      <h1>Resume your work</h1>
-      <div className="panel">
-        <p>Status: {session.status}</p>
-        <p>Started: {session.created_at}</p>
-      </div>
+      <h1>Analysis Progress</h1>
+      <p className="meta">
+        Status: {session.status} · Started {new Date(session.created_at).toLocaleString()}
+      </p>
       <ProgressPanel sessionId={session.id} />
       <p>
         <a href="/workspace">Return to workspace</a>

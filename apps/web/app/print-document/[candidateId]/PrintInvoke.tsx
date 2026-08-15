@@ -28,7 +28,7 @@ function checkFontsReady(): Promise<PrintReadinessOutcome> {
 // gives a neutral failure + safe retry — mirrors DestinationConfirmationGate
 // .tsx's minimal untested-client-component shape (no component test file;
 // the decision logic it calls, printReadiness.ts, is what's unit-tested).
-export default function PrintInvoke() {
+export default function PrintInvoke({ backHref }: { backHref: string }) {
   const [state, setState] = useState<State>("checking");
   const [retryToken, setRetryToken] = useState(0);
 
@@ -82,6 +82,9 @@ export default function PrintInvoke() {
           Print
         </button>
       ) : null}
+      <p>
+        <a href={backHref}>Back to Report</a>
+      </p>
     </div>
   );
 }
